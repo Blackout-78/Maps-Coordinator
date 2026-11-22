@@ -42,7 +42,7 @@ class MapView(ctx: Context) : View(ctx) {
     }
     private val loading = HashSet<Long>()
     private val dcache = object : LinkedHashMap<Long, List<MapStore.Poly>>(32, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, List<MapStore.Poly>>?): Boolean = size > 16
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, List<MapStore.Poly>>?): Boolean = size > 48
     }
     private val dloading = HashSet<Long>()
     @Volatile private var overview: List<MapStore.Poly>? = null
