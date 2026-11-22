@@ -1,6 +1,7 @@
 package app.mapscoordinator
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.DashPathEffect
@@ -33,6 +34,7 @@ class MapView(ctx: Context) : View(ctx) {
     var myAccuracy = 0f
     var onUserPan: (() -> Unit)? = null
     var hasMaps = false
+        set(v) { field = v; mapDirty = true; if (!v) bmp = null; invalidate() }
     private var interacting = false
 
     private val cache = object : LinkedHashMap<Long, List<MapStore.Poly>>(64, 0.75f, true) {
@@ -43,8 +45,21 @@ class MapView(ctx: Context) : View(ctx) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, List<MapStore.Poly>>?): Boolean = size > 16
     }
     private val dloading = HashSet<Long>()
-    private var overview: List<MapStore.Poly>? = null
-    private var ovLoading = false
+    @Volatile private var overview: List<MapStore.Poly>? = null
+    @Volatile private var ovLoading = false
+    @Volatile private var rMpp = 4.0
+    private var bmp: Bitmap? = null
+    private var bmpLat = 0.0
+    private var bmpLon = 0.0
+    private var bmpMpp = 1.0
+    @Volatile private var rendering = false
+    @Volatile private var mapDirty = true
+    private val renderExec = Executors.newSingleThreadExecutor()
+    private val bmpPaint = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val gpsPath = Path()
+    private val gpsFill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val dirtyRun = Runnable { mapDirty = true; invalidate() }
+    private fun postDirty() { removeCallbacks(dirtyRun); postDelayed(dirtyRun, 150) }
     private val exec = Executors.newSingleThreadExecutor()
 
     private val bg = Color.parseColor("#0E1424")
@@ -108,6 +123,8 @@ class MapView(ctx: Context) : View(ctx) {
         dloading.clear()
         overview = null
         ovLoading = false
+        bmp = null
+        mapDirty = true
         invalidate()
     }
 
@@ -125,7 +142,7 @@ class MapView(ctx: Context) : View(ctx) {
                         emptyList<MapStore.Poly>()
                     }
                     synchronized(cache) { cache[key] = polys; loading.remove(key) }
-                    postInvalidate()
+                    postDirty()
                 }
             }
         }
@@ -145,7 +162,7 @@ class MapView(ctx: Context) : View(ctx) {
                         emptyList<MapStore.Poly>()
                     }
                     synchronized(dcache) { dcache[key] = polys; dloading.remove(key) }
-                    postInvalidate()
+                    postDirty()
                 }
             }
         }
@@ -164,7 +181,7 @@ class MapView(ctx: Context) : View(ctx) {
                     MapStore.loadOverview(appCtx)
                 } catch (t: Throwable) { emptyList<MapStore.Poly>() }
                 overview = list
-                postInvalidate()
+                postDirty()
             }
         }
         return null
@@ -185,8 +202,8 @@ class MapView(ctx: Context) : View(ctx) {
         for (p in ov) {
             if (!visible(p)) continue
             if (p.type <= 3) {
-                if (p.type == 3 && mpp > 60) continue
-                if (p.type == 2 && mpp > 160) continue
+                if (p.type == 3 && rMpp > 60) continue
+                if (p.type == 2 && rMpp > 160) continue
                 byType[p.type].add(p)
             } else if (p.type == MapStore.T_PLACE) places.add(p)
         }
@@ -264,7 +281,7 @@ class MapView(ctx: Context) : View(ctx) {
         for (p in polys) {
             if (placed.size > 400) break
             val name = p.name ?: continue
-            if (p.type > MapStore.T_TRAIL || mpp > maxMppForName(p.type)) continue
+            if (p.type > MapStore.T_TRAIL || rMpp > maxMppForName(p.type)) continue
             var best = -1
             var bl = 0f
             for (i in 0 until p.lat.size - 1) {
@@ -382,7 +399,7 @@ class MapView(ctx: Context) : View(ctx) {
         for (p in polys.sortedBy { it.lanes }) {
             val rank = p.lanes
             val name = p.name ?: continue
-            if (rank < 1 || rank > 5 || mpp > maxMpp[rank]) continue
+            if (rank < 1 || rank > 5 || rMpp > maxMpp[rank]) continue
             setSize(sizes[rank])
             val x = sx(p.lon[0]); val y = sy(p.lat[0])
             if (x < 0 || x > fw || y < 0 || y > fh) continue
@@ -397,20 +414,19 @@ class MapView(ctx: Context) : View(ctx) {
         haloPaint.textAlign = Paint.Align.LEFT
     }
 
-    override fun onDraw(c: Canvas) {
+    private fun renderMap(c: Canvas, w: Float, h: Float, cenLat: Double, cenLon: Double, m: Double) {
+        rMpp = m
         c.drawColor(bg)
-        val w = width.toFloat()
-        val h = height.toFloat()
-        val cosLat = cos(Math.toRadians(centerLat))
-        val cLat = centerLat * 1e7
-        val cLon = centerLon * 1e7
-        val kx = 1e-7 * 111320.0 * cosLat / mpp
-        val ky = 1e-7 * 110574.0 / mpp
+        val cosLat = cos(Math.toRadians(cenLat))
+        val cLat = cenLat * 1e7
+        val cLon = cenLon * 1e7
+        val kx = 1e-7 * 111320.0 * cosLat / rMpp
+        val ky = 1e-7 * 110574.0 / rMpp
         fw = w; fh = h; fcLat = cLat; fcLon = cLon; fkx = kx; fky = ky
         placed.clear(); usedNames.clear(); signPos.clear()
 
-        val halfLon = (w / 2 * mpp) / (111320.0 * cosLat) * 1e7
-        val halfLat = (h / 2 * mpp) / 110574.0 * 1e7
+        val halfLon = (w / 2 * rMpp) / (111320.0 * cosLat) * 1e7
+        val halfLat = (h / 2 * rMpp) / 110574.0 * 1e7
         vMinLat = (cLat - halfLat - 2000).toInt(); vMaxLat = (cLat + halfLat + 2000).toInt()
         vMinLon = (cLon - halfLon - 2000).toInt(); vMaxLon = (cLon + halfLon + 2000).toInt()
         val cx0 = Math.floorDiv((cLon - halfLon).toLong(), MapStore.CELL_E7.toLong()).toInt()
@@ -425,22 +441,22 @@ class MapView(ctx: Context) : View(ctx) {
                 val polys = getCell(cx, cy) ?: continue
                 for (p in polys) {
                     if (!visible(p)) continue
-                    if (p.type == MapStore.T_TRAIL && mpp > 10) continue
-                    if (p.type == MapStore.T_SERVICE && mpp > 12) continue
-                    if (p.type == MapStore.T_LOCAL && mpp > 25) continue
+                    if (p.type == MapStore.T_TRAIL && rMpp > 10) continue
+                    if (p.type == MapStore.T_SERVICE && rMpp > 12) continue
+                    if (p.type == MapStore.T_LOCAL && rMpp > 25) continue
                     byType[p.type].add(p)
                 }
             }
-            drawLines(c, byType[MapStore.T_WATER], Color.parseColor("#3B6FA0"), maxOf(2f, (3f / mpp).toFloat()), null, w, h, cLat, cLon, kx, ky)
+            drawLines(c, byType[MapStore.T_WATER], Color.parseColor("#3B6FA0"), maxOf(2f, (3f / rMpp).toFloat()), null, w, h, cLat, cLon, kx, ky)
             // detail layer: buildings, house numbers, businesses (only when zoomed in)
             val detail = ArrayList<MapStore.Poly>()
-            if (mpp < 5) {
+            if (rMpp < 5) {
                 for (cy in cy0..cy1) for (cx in cx0..cx1) {
                     val d = getDetail(cx, cy) ?: continue
                     for (q in d) if (visible(q)) detail.add(q)
                 }
             }
-            if (mpp < 3) {
+            if (rMpp < 3) {
                 fillPaint.color = Color.parseColor("#1A2340")
                 paint.color = Color.parseColor("#3A4670")
                 paint.strokeWidth = 1.5f
@@ -469,17 +485,17 @@ class MapView(ctx: Context) : View(ctx) {
             val trailDash = DashPathEffect(floatArrayOf(14f, 10f), 0f)
             drawLines(c, byType[MapStore.T_TRAIL], Color.parseColor("#B88A5A"), 3f, trailDash, w, h, cLat, cLon, kx, ky)
             // dirt roads: two-track look
-            val dirtPx = maxOf(5f, (4f / mpp).toFloat())
+            val dirtPx = maxOf(5f, (4f / rMpp).toFloat())
             drawLines(c, byType[MapStore.T_DIRT], Color.parseColor("#C8A96E"), dirtPx + 2f, null, w, h, cLat, cLon, kx, ky)
             drawLines(c, byType[MapStore.T_DIRT], Color.parseColor("#1B2A30"), dirtPx - 2f, null, w, h, cLat, cLon, kx, ky)
             // paved roads, small to big
             for (t in intArrayOf(5, 4, 3, 2, 1, 0)) {
-                val px = maxOf(3f, (widthM[t] / mpp).toFloat())
+                val px = maxOf(3f, (widthM[t] / rMpp).toFloat())
                 drawLines(c, byType[t], casing, px + 3f, null, w, h, cLat, cLon, kx, ky)
                 drawLines(c, byType[t], roadFill[t], px, null, w, h, cLat, cLon, kx, ky)
             }
             // lane centre line when zoomed in on a road with 2+ lanes
-            if (mpp < 2.5) {
+            if (rMpp < 2.5) {
                 val dash = DashPathEffect(floatArrayOf(18f, 14f), 0f)
                 for (t in 0..4) {
                     val list = ArrayList<MapStore.Poly>()
@@ -488,7 +504,7 @@ class MapView(ctx: Context) : View(ctx) {
                 }
             }
             // stop signs
-            if (mpp < 5) {
+            if (rMpp < 5) {
                 for (p in byType[MapStore.T_STOP]) {
                     val x = (w / 2 + (p.lon[0] - cLon) * kx).toFloat()
                     val y = (h / 2 - (p.lat[0] - cLat) * ky).toFloat()
@@ -505,15 +521,87 @@ class MapView(ctx: Context) : View(ctx) {
             val roads = ArrayList<MapStore.Poly>()
             for (t in 0..8) roads.addAll(byType[t])
             roads.sortBy { it.type }
-            if (!interacting) {
+            run {
                 drawStreetNames(c, roads)
-                if (mpp < 3) drawSpeedSigns(c, roads)
-                if (mpp < 1.5) drawHouseNumbers(c, detail)
-                if (mpp < 5) drawBusinesses(c, detail)
+                if (rMpp < 3) drawSpeedSigns(c, roads)
+                if (rMpp < 1.5) drawHouseNumbers(c, detail)
+                if (rMpp < 5) drawBusinesses(c, detail)
             }
             drawPlaces(c, byType[MapStore.T_PLACE])
         } else if (hasMaps && tooWide) {
             drawOverview(c)
+        }
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
+        super.onSizeChanged(w, h, ow, oh)
+        bmp = null
+        mapDirty = true
+    }
+
+    private fun requestRender() {
+        if (rendering || width == 0 || height == 0) return
+        rendering = true
+        mapDirty = false
+        val bw = (width * 1.6f).toInt()
+        val bh = (height * 1.6f).toInt()
+        val lat = centerLat
+        val lon = centerLon
+        val m = mpp
+        renderExec.execute {
+            var out: Bitmap? = null
+            try {
+                out = Bitmap.createBitmap(bw, bh, Bitmap.Config.RGB_565)
+                renderMap(Canvas(out), bw.toFloat(), bh.toFloat(), lat, lon, m)
+            } catch (t: Throwable) {
+                out = null
+            }
+            val result = out
+            val done = Runnable {
+                val old = bmp
+                if (result != null) {
+                    bmp = result; bmpLat = lat; bmpLon = lon; bmpMpp = m
+                    old?.recycle()
+                }
+                rendering = false
+                invalidate()
+            }
+            if (result != null) post(done) else postDelayed(done, 1500)
+        }
+    }
+
+    override fun onDraw(c: Canvas) {
+        c.drawColor(bg)
+        val w = width.toFloat()
+        val h = height.toFloat()
+        val cosLat = cos(Math.toRadians(centerLat))
+        val cLat = centerLat * 1e7
+        val cLon = centerLon * 1e7
+        val kx = 1e-7 * 111320.0 * cosLat / mpp
+        val ky = 1e-7 * 110574.0 / mpp
+
+        if (hasMaps) {
+            val b = bmp
+            var needs = b == null || mapDirty
+            if (b != null) {
+                val s = (bmpMpp / mpp).toFloat()
+                val cx = w / 2 + ((bmpLon - centerLon) * 111320.0 * cosLat / mpp).toFloat()
+                val cy = h / 2 + ((centerLat - bmpLat) * 110574.0 / mpp).toFloat()
+                val hw = b.width / 2f * s
+                val hh = b.height / 2f * s
+                c.save()
+                c.translate(cx, cy)
+                c.scale(s, s)
+                c.drawBitmap(b, -b.width / 2f, -b.height / 2f, bmpPaint)
+                c.restore()
+                if (!scaler.isInProgress) {
+                    val mx = w * 0.05f
+                    val my = h * 0.05f
+                    if (cx - hw > -mx || cx + hw < w + mx || cy - hh > -my || cy + hh < h + my) needs = true
+                    if (abs(s - 1f) > 0.002f) needs = true
+                }
+            }
+            if (needs) requestRender()
         }
 
         if (hasFix) {
@@ -521,22 +609,22 @@ class MapView(ctx: Context) : View(ctx) {
             val y = (h / 2 - (myLat * 1e7 - cLat) * ky).toFloat()
             val accPx = (myAccuracy / mpp).toFloat()
             if (accPx > 12f) {
-                fillPaint.color = Color.argb(40, 77, 163, 255)
-                c.drawCircle(x, y, accPx, fillPaint)
+                gpsFill.color = Color.argb(40, 77, 163, 255)
+                c.drawCircle(x, y, accPx, gpsFill)
             }
             c.save()
             c.translate(x, y)
             if (myBearing >= 0f) c.rotate(myBearing)
-            path.reset()
-            path.moveTo(0f, -22f)
-            path.lineTo(14f, 16f)
-            path.lineTo(0f, 9f)
-            path.lineTo(-14f, 16f)
-            path.close()
-            fillPaint.color = Color.parseColor("#EAF0FF")
-            c.drawPath(path, fillPaint)
-            fillPaint.color = Color.parseColor("#4DA3FF")
-            c.drawCircle(0f, 0f, 6f, fillPaint)
+            gpsPath.reset()
+            gpsPath.moveTo(0f, -22f)
+            gpsPath.lineTo(14f, 16f)
+            gpsPath.lineTo(0f, 9f)
+            gpsPath.lineTo(-14f, 16f)
+            gpsPath.close()
+            gpsFill.color = Color.parseColor("#EAF0FF")
+            c.drawPath(gpsPath, gpsFill)
+            gpsFill.color = Color.parseColor("#4DA3FF")
+            c.drawCircle(0f, 0f, 6f, gpsFill)
             c.restore()
         }
     }
