@@ -88,7 +88,7 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
     private fun writeNode(id: Long, lat: Int, lon: Int) {
         if (id <= lastNodeId) unsorted = true
         lastNodeId = id
-        val o = nodeOut!!
+        val o = nodeOut ?: throw ImportException("This file is not sorted (points after roads). Use a Geofabrik .osm.pbf file.")
         o.writeLong(id)
         o.writeInt(lat)
         o.writeInt(lon)
@@ -125,6 +125,7 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
     // ---- cell output ----
     private val cells = HashMap<Long, ByteArrayOutputStream>()
     private val dcells = HashMap<Long, ByteArrayOutputStream>()
+    private val ovr = ByteArrayOutputStream(1 shl 16)
     private var bufBytes = 0L
     private var wayCount = 0L
     private var stopCount = 0L
@@ -167,6 +168,7 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
             if (b.size > 120) b = b.copyOf(120)
             nameBytes = b
         }
+        if (type <= MapStore.T_TERTIARY || type == MapStore.T_PLACE) writeOverview(type, lanes, speed, lat, lon, n, nameBytes)
         for (i in 0 until n) {
             if (lat[i] < minLat) minLat = lat[i]
             if (lat[i] > maxLat) maxLat = lat[i]
@@ -190,6 +192,33 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
         if (n - 1 > start) writePiece(cur, type, lanes, speed, lat, lon, start, n - 1, nameBytes)
     }
 
+    private fun writeOverview(type: Int, lanes: Int, speed: Int, lat: IntArray, lon: IntArray, n: Int, nameBytes: ByteArray?) {
+        val ol = IntArray(n)
+        val oo = IntArray(n)
+        var m = 0
+        for (i in 0 until n) {
+            if (m == 0 || i == n - 1 ||
+                Math.max(Math.abs(lat[i] - ol[m - 1]), Math.abs(lon[i] - oo[m - 1])) >= 3000) {
+                ol[m] = lat[i]; oo[m] = lon[i]; m++
+            }
+        }
+        if (n >= 2 && m < 2) return
+        val o = DataOutputStream(ovr)
+        var from = 0
+        while (from < m) {
+            val to = Math.min(m, from + 60000)
+            o.writeByte(if (nameBytes != null) (type or 0x80) else type)
+            o.writeByte(if (lanes > 255) 255 else lanes)
+            o.writeShort(speed)
+            o.writeShort(to - from)
+            for (i in from until to) { o.writeInt(ol[i]); o.writeInt(oo[i]) }
+            if (nameBytes != null) { o.writeByte(nameBytes.size); o.write(nameBytes) }
+            bufBytes += 6L + (to - from) * 8L + (if (nameBytes != null) 1L + nameBytes.size else 0L)
+            if (to >= m) break
+            from = to - 1
+        }
+    }
+
     private fun flushCells() {
         val dir = MapStore.dir(ctx)
         for ((key, bo) in cells) {
@@ -204,6 +233,10 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
             FileOutputStream(File(dir, "${cy}_${cx}.d"), true).use { bo.writeTo(it) }
         }
         dcells.clear()
+        if (ovr.size() > 0) {
+            FileOutputStream(File(dir, "overview.t"), true).use { ovr.writeTo(it) }
+            ovr.reset()
+        }
         bufBytes = 0L
     }
 

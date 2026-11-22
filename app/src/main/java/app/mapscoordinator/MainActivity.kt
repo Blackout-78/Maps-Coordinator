@@ -103,7 +103,24 @@ class MainActivity : Activity(), LocationListener {
         if (bold) typeface = Typeface.DEFAULT_BOLD
     }
 
+    private fun installCrashLog() {
+        val prev = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e ->
+            try {
+                val rt = Runtime.getRuntime()
+                val sw = java.io.StringWriter()
+                e.printStackTrace(java.io.PrintWriter(sw))
+                java.io.File(filesDir, "crash.txt").writeText(
+                    "v${versionName()} build ${versionCode()}\n${java.util.Date()}\nthread ${t.name}\n" +
+                    "heap used ${(rt.totalMemory() - rt.freeMemory()) / 1048576} MB of max ${rt.maxMemory() / 1048576} MB\n" +
+                    sw.toString().take(6000))
+            } catch (x: Throwable) { }
+            prev?.uncaughtException(t, e)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
+        installCrashLog()
         super.onCreate(savedInstanceState)
         window.statusBarColor = NAVY
         window.navigationBarColor = NAVY
@@ -232,6 +249,28 @@ class MainActivity : Activity(), LocationListener {
             Toast.makeText(this, "Maps deleted", Toast.LENGTH_SHORT).show()
         }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
         col.addView(mapsCard)
+
+        val crashFile = java.io.File(filesDir, "crash.txt")
+        if (crashFile.exists()) {
+            section("LAST CRASH")
+            val xCard = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                background = card()
+                setPadding(dp(14), dp(12), dp(14), dp(12))
+            }
+            val crashText = try { crashFile.readText() } catch (e: Exception) { "" }
+            xCard.addView(label(crashText.take(900), 10f, SUB).apply { typeface = Typeface.MONOSPACE })
+            xCard.addView(button("Copy crash text", true) {
+                val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("crash", crashText))
+                Toast.makeText(this, "Copied", Toast.LENGTH_SHORT).show()
+            }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+            xCard.addView(button("Clear crash text", false) {
+                crashFile.delete()
+                Toast.makeText(this, "Cleared. Reopen Settings.", Toast.LENGTH_SHORT).show()
+            }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+            col.addView(xCard)
+        }
 
         section("VERSION")
         val vCard = LinearLayout(this).apply {

@@ -107,7 +107,47 @@ object MapStore {
         false
     }
 
-    fun cellCount(ctx: Context): Int = dir(ctx).listFiles { f -> f.name.endsWith(".t") }?.size ?: 0
+    /** Major roads and place names for the zoomed-out view. Written during import. */
+    fun loadOverview(ctx: Context): List<Poly> = loadFile(File(dir(ctx), "overview.t"))
+
+    /** Builds overview.t from the existing cell files (for maps imported before it existed). One time. */
+    fun buildOverview(ctx: Context) {
+        val d = dir(ctx)
+        val tmp = File(d, "overview.tmp")
+        java.io.DataOutputStream(java.io.BufferedOutputStream(java.io.FileOutputStream(tmp), 1 shl 16)).use { o ->
+            val files = d.listFiles { f -> f.name.endsWith(".t") && f.name != "overview.t" } ?: emptyArray()
+            for (f in files) {
+                for (p in loadFile(f)) {
+                    if (p.type > T_TERTIARY && p.type != T_PLACE) continue
+                    val n = p.lat.size
+                    if (n == 0 || n > 60000) continue
+                    val la = IntArray(n)
+                    val lo = IntArray(n)
+                    var m = 0
+                    for (i in 0 until n) {
+                        if (m == 0 || i == n - 1 ||
+                            Math.max(Math.abs(p.lat[i] - la[m - 1]), Math.abs(p.lon[i] - lo[m - 1])) >= 3000) {
+                            la[m] = p.lat[i]; lo[m] = p.lon[i]; m++
+                        }
+                    }
+                    if (n >= 2 && m < 2) continue
+                    val nb = p.name?.toByteArray(Charsets.UTF_8)?.let { if (it.size > 120) it.copyOf(120) else it }
+                    o.writeByte(if (nb != null) (p.type or 0x80) else p.type)
+                    o.writeByte(if (p.lanes > 255) 255 else p.lanes)
+                    o.writeShort(p.speed)
+                    o.writeShort(m)
+                    for (i in 0 until m) { o.writeInt(la[i]); o.writeInt(lo[i]) }
+                    if (nb != null) { o.writeByte(nb.size); o.write(nb) }
+                }
+            }
+        }
+        val dst = File(d, "overview.t")
+        dst.delete()
+        tmp.renameTo(dst)
+    }
+
+    fun cellCount(ctx: Context): Int =
+        dir(ctx).listFiles { f -> f.name.endsWith(".t") && f.name != "overview.t" }?.size ?: 0
 
     fun sizeBytes(ctx: Context): Long {
         var s = 0L

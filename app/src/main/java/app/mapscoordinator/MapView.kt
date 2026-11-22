@@ -33,6 +33,7 @@ class MapView(ctx: Context) : View(ctx) {
     var myAccuracy = 0f
     var onUserPan: (() -> Unit)? = null
     var hasMaps = false
+    private var interacting = false
 
     private val cache = object : LinkedHashMap<Long, List<MapStore.Poly>>(64, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, List<MapStore.Poly>>?): Boolean = size > 120
@@ -42,6 +43,8 @@ class MapView(ctx: Context) : View(ctx) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, List<MapStore.Poly>>?): Boolean = size > 16
     }
     private val dloading = HashSet<Long>()
+    private var overview: List<MapStore.Poly>? = null
+    private var ovLoading = false
     private val exec = Executors.newSingleThreadExecutor()
 
     private val bg = Color.parseColor("#0E1424")
@@ -77,20 +80,24 @@ class MapView(ctx: Context) : View(ctx) {
     })
     private val scaler = ScaleGestureDetector(ctx, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
         override fun onScale(d: ScaleGestureDetector): Boolean {
-            mpp = (mpp / d.scaleFactor).coerceIn(0.3, 80.0)
+            mpp = (mpp / d.scaleFactor).coerceIn(0.3, 600.0)
             invalidate()
             return true
         }
     })
 
     override fun onTouchEvent(e: MotionEvent): Boolean {
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> interacting = true
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { interacting = false; invalidate() }
+        }
         scaler.onTouchEvent(e)
         if (!scaler.isInProgress) gestures.onTouchEvent(e)
         return true
     }
 
     fun zoomBy(f: Double) {
-        mpp = (mpp / f).coerceIn(0.3, 80.0)
+        mpp = (mpp / f).coerceIn(0.3, 600.0)
         invalidate()
     }
 
@@ -99,6 +106,8 @@ class MapView(ctx: Context) : View(ctx) {
         loading.clear()
         synchronized(dcache) { dcache.clear() }
         dloading.clear()
+        overview = null
+        ovLoading = false
         invalidate()
     }
 
@@ -111,7 +120,10 @@ class MapView(ctx: Context) : View(ctx) {
             if (loading.add(key)) {
                 val appCtx = context.applicationContext
                 exec.execute {
-                    val polys = MapStore.loadCell(appCtx, cx, cy)
+                    val polys = try { MapStore.loadCell(appCtx, cx, cy) } catch (t: Throwable) {
+                        synchronized(cache) { cache.clear() }
+                        emptyList<MapStore.Poly>()
+                    }
                     synchronized(cache) { cache[key] = polys; loading.remove(key) }
                     postInvalidate()
                 }
@@ -128,13 +140,60 @@ class MapView(ctx: Context) : View(ctx) {
             if (dloading.add(key)) {
                 val appCtx = context.applicationContext
                 exec.execute {
-                    val polys = MapStore.loadDetail(appCtx, cx, cy)
+                    val polys = try { MapStore.loadDetail(appCtx, cx, cy) } catch (t: Throwable) {
+                        synchronized(dcache) { dcache.clear() }
+                        emptyList<MapStore.Poly>()
+                    }
                     synchronized(dcache) { dcache[key] = polys; dloading.remove(key) }
                     postInvalidate()
                 }
             }
         }
         return null
+    }
+
+    private fun getOverview(): List<MapStore.Poly>? {
+        val o = overview
+        if (o != null) return o
+        if (!ovLoading) {
+            ovLoading = true
+            val appCtx = context.applicationContext
+            exec.execute {
+                val list = try {
+                    if (!java.io.File(MapStore.dir(appCtx), "overview.t").exists() && MapStore.hasAny(appCtx)) MapStore.buildOverview(appCtx)
+                    MapStore.loadOverview(appCtx)
+                } catch (t: Throwable) { emptyList<MapStore.Poly>() }
+                overview = list
+                postInvalidate()
+            }
+        }
+        return null
+    }
+
+    private fun drawOverview(c: Canvas) {
+        val ov = getOverview()
+        if (ov == null) {
+            c.drawText("Preparing the zoomed-out view (one time)…", fw / 2, fh / 2, textPaint)
+            return
+        }
+        if (ov.isEmpty()) {
+            c.drawText("No major roads in this map", fw / 2, fh / 2, textPaint)
+            return
+        }
+        val byType = Array(4) { ArrayList<MapStore.Poly>() }
+        val places = ArrayList<MapStore.Poly>()
+        for (p in ov) {
+            if (!visible(p)) continue
+            if (p.type <= 3) {
+                if (p.type == 3 && mpp > 60) continue
+                if (p.type == 2 && mpp > 160) continue
+                byType[p.type].add(p)
+            } else if (p.type == MapStore.T_PLACE) places.add(p)
+        }
+        val wd = floatArrayOf(3.5f, 2.6f, 2f, 1.4f)
+        for (t in intArrayOf(3, 2, 1, 0)) drawLines(c, byType[t], roadFill[t], wd[t] * dens, null)
+        placed.clear()
+        drawPlaces(c, places)
     }
 
     // ---- labels ----
@@ -203,6 +262,7 @@ class MapView(ctx: Context) : View(ctx) {
         setSize(12f)
         val ts = labelPaint.textSize
         for (p in polys) {
+            if (placed.size > 400) break
             val name = p.name ?: continue
             if (p.type > MapStore.T_TRAIL || mpp > maxMppForName(p.type)) continue
             var best = -1
@@ -315,7 +375,7 @@ class MapView(ctx: Context) : View(ctx) {
     }
 
     private fun drawPlaces(c: Canvas, polys: List<MapStore.Poly>) {
-        val maxMpp = doubleArrayOf(0.0, 80.0, 40.0, 20.0, 10.0, 8.0)
+        val maxMpp = doubleArrayOf(0.0, 700.0, 300.0, 120.0, 40.0, 25.0)
         val sizes = floatArrayOf(0f, 20f, 17f, 15f, 13f, 12f)
         labelPaint.textAlign = Paint.Align.CENTER
         haloPaint.textAlign = Paint.Align.CENTER
@@ -357,7 +417,7 @@ class MapView(ctx: Context) : View(ctx) {
         val cx1 = Math.floorDiv((cLon + halfLon).toLong(), MapStore.CELL_E7.toLong()).toInt()
         val cy0 = Math.floorDiv((cLat - halfLat).toLong(), MapStore.CELL_E7.toLong()).toInt()
         val cy1 = Math.floorDiv((cLat + halfLat).toLong(), MapStore.CELL_E7.toLong()).toInt()
-        val tooWide = (cx1 - cx0 + 1) * (cy1 - cy0 + 1) > 160
+        val tooWide = (cx1 - cx0 + 1).toLong() * (cy1 - cy0 + 1) > 100
 
         if (hasMaps && !tooWide) {
             val byType = Array(15) { ArrayList<MapStore.Poly>() }
@@ -384,17 +444,27 @@ class MapView(ctx: Context) : View(ctx) {
                 fillPaint.color = Color.parseColor("#1A2340")
                 paint.color = Color.parseColor("#3A4670")
                 paint.strokeWidth = 1.5f
+                var nb = 0
+                path.reset()
                 for (p in detail) {
                     if (p.type != MapStore.T_BUILD || p.lat.size < 3) continue
-                    path.reset()
                     for (i in p.lat.indices) {
                         val x = sx(p.lon[i]); val y = sy(p.lat[i])
                         if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
                     }
                     path.close()
+                    if (++nb >= 250) {
+                        c.drawPath(path, fillPaint)
+                        c.drawPath(path, paint)
+                        path.reset()
+                        nb = 0
+                    }
+                }
+                if (nb > 0) {
                     c.drawPath(path, fillPaint)
                     c.drawPath(path, paint)
                 }
+                path.reset()
             }
             val trailDash = DashPathEffect(floatArrayOf(14f, 10f), 0f)
             drawLines(c, byType[MapStore.T_TRAIL], Color.parseColor("#B88A5A"), 3f, trailDash, w, h, cLat, cLon, kx, ky)
@@ -435,13 +505,15 @@ class MapView(ctx: Context) : View(ctx) {
             val roads = ArrayList<MapStore.Poly>()
             for (t in 0..8) roads.addAll(byType[t])
             roads.sortBy { it.type }
-            drawStreetNames(c, roads)
-            if (mpp < 3) drawSpeedSigns(c, roads)
-            if (mpp < 1.5) drawHouseNumbers(c, detail)
-            if (mpp < 5) drawBusinesses(c, detail)
+            if (!interacting) {
+                drawStreetNames(c, roads)
+                if (mpp < 3) drawSpeedSigns(c, roads)
+                if (mpp < 1.5) drawHouseNumbers(c, detail)
+                if (mpp < 5) drawBusinesses(c, detail)
+            }
             drawPlaces(c, byType[MapStore.T_PLACE])
         } else if (hasMaps && tooWide) {
-            c.drawText("Zoom in to see the map", w / 2, h / 2, textPaint)
+            drawOverview(c)
         }
 
         if (hasFix) {
@@ -470,20 +542,27 @@ class MapView(ctx: Context) : View(ctx) {
     }
 
     private fun drawLines(c: Canvas, list: List<MapStore.Poly>, color: Int, width: Float, effect: DashPathEffect?,
-                          w: Float, h: Float, cLat: Double, cLon: Double, kx: Double, ky: Double) {
+                          w: Float = fw, h: Float = fh, cLat: Double = fcLat, cLon: Double = fcLon,
+                          kx: Double = fkx, ky: Double = fky) {
         if (list.isEmpty()) return
         paint.color = color
         paint.strokeWidth = width
         paint.pathEffect = effect
+        var inPath = 0
+        path.reset()
         for (p in list) {
-            path.reset()
             for (i in p.lat.indices) {
                 val x = (w / 2 + (p.lon[i] - cLon) * kx).toFloat()
                 val y = (h / 2 - (p.lat[i] - cLat) * ky).toFloat()
                 if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
             }
-            c.drawPath(path, paint)
+            if (++inPath >= 300) {
+                c.drawPath(path, paint)
+                path.reset()
+                inPath = 0
+            }
         }
+        if (inPath > 0) c.drawPath(path, paint)
         paint.pathEffect = null
     }
 }
