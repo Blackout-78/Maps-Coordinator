@@ -35,11 +35,11 @@ class MapView(ctx: Context) : View(ctx) {
     var hasMaps = false
 
     private val cache = object : LinkedHashMap<Long, List<MapStore.Poly>>(64, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, List<MapStore.Poly>>?): Boolean = size > 300
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, List<MapStore.Poly>>?): Boolean = size > 120
     }
     private val loading = HashSet<Long>()
     private val dcache = object : LinkedHashMap<Long, List<MapStore.Poly>>(32, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, List<MapStore.Poly>>?): Boolean = size > 40
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, List<MapStore.Poly>>?): Boolean = size > 16
     }
     private val dloading = HashSet<Long>()
     private val exec = Executors.newSingleThreadExecutor()
@@ -152,6 +152,15 @@ class MapView(ctx: Context) : View(ctx) {
         strokeJoin = Paint.Join.ROUND
         textAlign = Paint.Align.LEFT
     }
+    private val num = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.BLACK; typeface = Typeface.DEFAULT_BOLD; textAlign = Paint.Align.CENTER
+        textSize = 17f * dens
+    }
+    private val small = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.BLACK; typeface = Typeface.DEFAULT_BOLD; textAlign = Paint.Align.CENTER
+        textSize = 7f * dens
+    }
+    private val box = Paint(Paint.ANTI_ALIAS_FLAG)
     private val placed = ArrayList<RectF>()
     private val usedNames = ArrayList<Triple<String, Float, Float>>()
     private val signPos = ArrayList<Triple<Int, Float, Float>>()
@@ -160,6 +169,13 @@ class MapView(ctx: Context) : View(ctx) {
     private var fcLat = 0.0
     private var fcLon = 0.0
     private var fkx = 1.0
+    private var vMinLat = 0
+    private var vMaxLat = 0
+    private var vMinLon = 0
+    private var vMaxLon = 0
+
+    private fun visible(p: MapStore.Poly): Boolean =
+        p.maxLat >= vMinLat && p.minLat <= vMaxLat && p.maxLon >= vMinLon && p.minLon <= vMaxLon
     private var fky = 1.0
 
     private fun sx(lon: Int): Float = (fw / 2 + (lon - fcLon) * fkx).toFloat()
@@ -225,15 +241,6 @@ class MapView(ctx: Context) : View(ctx) {
     }
 
     private fun drawSpeedSigns(c: Canvas, polys: List<MapStore.Poly>) {
-        val num = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.BLACK; typeface = Typeface.DEFAULT_BOLD; textAlign = Paint.Align.CENTER
-            textSize = 17f * dens
-        }
-        val small = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.BLACK; typeface = Typeface.DEFAULT_BOLD; textAlign = Paint.Align.CENTER
-            textSize = 7f * dens
-        }
-        val box = Paint(Paint.ANTI_ALIAS_FLAG)
         val sw = 22f * dens
         val shh = 29f * dens
         for (p in polys) {
@@ -344,6 +351,8 @@ class MapView(ctx: Context) : View(ctx) {
 
         val halfLon = (w / 2 * mpp) / (111320.0 * cosLat) * 1e7
         val halfLat = (h / 2 * mpp) / 110574.0 * 1e7
+        vMinLat = (cLat - halfLat - 2000).toInt(); vMaxLat = (cLat + halfLat + 2000).toInt()
+        vMinLon = (cLon - halfLon - 2000).toInt(); vMaxLon = (cLon + halfLon + 2000).toInt()
         val cx0 = Math.floorDiv((cLon - halfLon).toLong(), MapStore.CELL_E7.toLong()).toInt()
         val cx1 = Math.floorDiv((cLon + halfLon).toLong(), MapStore.CELL_E7.toLong()).toInt()
         val cy0 = Math.floorDiv((cLat - halfLat).toLong(), MapStore.CELL_E7.toLong()).toInt()
@@ -355,6 +364,7 @@ class MapView(ctx: Context) : View(ctx) {
             for (cy in cy0..cy1) for (cx in cx0..cx1) {
                 val polys = getCell(cx, cy) ?: continue
                 for (p in polys) {
+                    if (!visible(p)) continue
                     if (p.type == MapStore.T_TRAIL && mpp > 10) continue
                     if (p.type == MapStore.T_SERVICE && mpp > 12) continue
                     if (p.type == MapStore.T_LOCAL && mpp > 25) continue
@@ -367,7 +377,7 @@ class MapView(ctx: Context) : View(ctx) {
             if (mpp < 5) {
                 for (cy in cy0..cy1) for (cx in cx0..cx1) {
                     val d = getDetail(cx, cy) ?: continue
-                    detail.addAll(d)
+                    for (q in d) if (visible(q)) detail.add(q)
                 }
             }
             if (mpp < 3) {

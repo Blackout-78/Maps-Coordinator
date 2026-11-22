@@ -14,7 +14,24 @@ import java.io.FileInputStream
 object MapStore {
     const val CELL_E7 = 200000
 
-    class Poly(val type: Int, val lanes: Int, val speed: Int, val lat: IntArray, val lon: IntArray, val name: String? = null)
+    class Poly(val type: Int, val lanes: Int, val speed: Int, val lat: IntArray, val lon: IntArray, val name: String? = null) {
+        val minLat: Int
+        val maxLat: Int
+        val minLon: Int
+        val maxLon: Int
+
+        init {
+            var a = Int.MAX_VALUE; var b = Int.MIN_VALUE; var c = Int.MAX_VALUE; var e = Int.MIN_VALUE
+            for (i in lat.indices) {
+                val la = lat[i]; val lo = lon[i]
+                if (la < a) a = la
+                if (la > b) b = la
+                if (lo < c) c = lo
+                if (lo > e) e = lo
+            }
+            minLat = a; maxLat = b; minLon = c; maxLon = e
+        }
+    }
 
     // type codes
     const val T_MOTORWAY = 0
@@ -81,6 +98,13 @@ object MapStore {
             // A damaged cell file shows what could be read and nothing more.
         }
         return out
+    }
+
+    /** Fast check: is there at least one file? Does not list the whole folder. */
+    fun hasAny(ctx: Context): Boolean = try {
+        java.nio.file.Files.newDirectoryStream(dir(ctx).toPath()).use { it.iterator().hasNext() }
+    } catch (e: Exception) {
+        false
     }
 
     fun cellCount(ctx: Context): Int = dir(ctx).listFiles { f -> f.name.endsWith(".t") }?.size ?: 0

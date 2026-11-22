@@ -281,14 +281,24 @@ class MainActivity : Activity(), LocationListener {
     }
 
     private fun refreshMapState() {
-        val cells = MapStore.cellCount(this)
-        map.hasMaps = cells > 0
-        emptyText.visibility = if (cells > 0) View.GONE else View.VISIBLE
-        val mb = MapStore.sizeBytes(this) / (1024 * 1024)
-        val regions = MapStore.regions(this)
-        settingsStats.text = if (cells == 0) "No maps installed." else
-            "${regions.size} map file(s) imported · $cells cells · $mb MB\n" + regions.joinToString(", ")
+        // Quick check on the main thread; the slow folder scan runs in the background.
+        val any = MapStore.hasAny(this)
+        map.hasMaps = any
+        emptyText.visibility = if (any) View.GONE else View.VISIBLE
         map.invalidate()
+        if (!any) {
+            settingsStats.text = "No maps installed."
+            return
+        }
+        settingsStats.text = "Counting maps…"
+        Thread {
+            val cells = MapStore.cellCount(this)
+            val mb = MapStore.sizeBytes(this) / (1024 * 1024)
+            val regions = MapStore.regions(this)
+            runOnUiThread {
+                settingsStats.text = "${regions.size} map file(s) imported · $cells cells · $mb MB\n" + regions.joinToString(", ")
+            }
+        }.start()
     }
 
     private fun updateButtons() { /* reserved for follow state */ }

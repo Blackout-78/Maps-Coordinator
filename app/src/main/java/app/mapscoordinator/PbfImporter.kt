@@ -157,7 +157,7 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
             o.write(nameBytes)
         }
         bufBytes += 6L + count * 8L + (if (nameBytes != null) 1L + nameBytes.size else 0L)
-        if (bufBytes > 48L * 1024 * 1024) flushCells()
+        if (bufBytes > 24L * 1024 * 1024) flushCells()
     }
 
     private fun emit(type: Int, lanes: Int, speed: Int, lat: IntArray, lon: IntArray, n: Int, name: String? = null) {
