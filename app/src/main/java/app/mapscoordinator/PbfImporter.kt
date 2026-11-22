@@ -124,6 +124,7 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
 
     // ---- cell output ----
     private val cells = HashMap<Long, ByteArrayOutputStream>()
+    private val dcells = HashMap<Long, ByteArrayOutputStream>()
     private var bufBytes = 0L
     private var wayCount = 0L
     private var stopCount = 0L
@@ -139,11 +140,11 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
     }
 
     private fun writePiece(key: Long, type: Int, lanes: Int, speed: Int,
-                           lat: IntArray, lon: IntArray, from: Int, toInclusive: Int) {
+                           lat: IntArray, lon: IntArray, from: Int, toInclusive: Int, nameBytes: ByteArray?) {
         val count = toInclusive - from + 1
-        val bo = cells.getOrPut(key) { ByteArrayOutputStream(1024) }
+        val bo = (if (type in 12..14) dcells else cells).getOrPut(key) { ByteArrayOutputStream(1024) }
         val o = DataOutputStream(bo)
-        o.writeByte(type)
+        o.writeByte(if (nameBytes != null) (type or 0x80) else type)
         o.writeByte(if (lanes > 255) 255 else lanes)
         o.writeShort(speed)
         o.writeShort(count)
@@ -151,11 +152,21 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
             o.writeInt(lat[i])
             o.writeInt(lon[i])
         }
-        bufBytes += 6L + count * 8L
+        if (nameBytes != null) {
+            o.writeByte(nameBytes.size)
+            o.write(nameBytes)
+        }
+        bufBytes += 6L + count * 8L + (if (nameBytes != null) 1L + nameBytes.size else 0L)
         if (bufBytes > 48L * 1024 * 1024) flushCells()
     }
 
-    private fun emit(type: Int, lanes: Int, speed: Int, lat: IntArray, lon: IntArray, n: Int) {
+    private fun emit(type: Int, lanes: Int, speed: Int, lat: IntArray, lon: IntArray, n: Int, name: String? = null) {
+        var nameBytes: ByteArray? = null
+        if (name != null && name.isNotEmpty()) {
+            var b = name.toByteArray(Charsets.UTF_8)
+            if (b.size > 120) b = b.copyOf(120)
+            nameBytes = b
+        }
         for (i in 0 until n) {
             if (lat[i] < minLat) minLat = lat[i]
             if (lat[i] > maxLat) maxLat = lat[i]
@@ -163,7 +174,7 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
             if (lon[i] > maxLon) maxLon = lon[i]
         }
         if (n == 1) {
-            writePiece(cellKey(lat[0], lon[0]), type, lanes, speed, lat, lon, 0, 0)
+            writePiece(cellKey(lat[0], lon[0]), type, lanes, speed, lat, lon, 0, 0, nameBytes)
             return
         }
         var start = 0
@@ -171,12 +182,12 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
         for (i in 1 until n) {
             val c = cellKey(lat[i], lon[i])
             if (c != cur) {
-                writePiece(cur, type, lanes, speed, lat, lon, start, i)
+                writePiece(cur, type, lanes, speed, lat, lon, start, i, nameBytes)
                 start = i
                 cur = c
             }
         }
-        if (n - 1 > start) writePiece(cur, type, lanes, speed, lat, lon, start, n - 1)
+        if (n - 1 > start) writePiece(cur, type, lanes, speed, lat, lon, start, n - 1, nameBytes)
     }
 
     private fun flushCells() {
@@ -187,6 +198,12 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
             FileOutputStream(File(dir, "${cy}_${cx}.t"), true).use { bo.writeTo(it) }
         }
         cells.clear()
+        for ((key, bo) in dcells) {
+            val cy = (key shr 32).toInt()
+            val cx = key.toInt()
+            FileOutputStream(File(dir, "${cy}_${cx}.d"), true).use { bo.writeTo(it) }
+        }
+        dcells.clear()
         bufBytes = 0L
     }
 
@@ -403,20 +420,56 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
             writeNode(id, latE7, lonE7)
             if (kv.isNotEmpty()) {
                 var isStop = false
+                var name: String? = null
+                var place: String? = null
+                var house: String? = null
+                var amenity: String? = null
+                var shop: String? = null
+                var tourism: String? = null
                 while (k < kv.size && kv[k] != 0) {
-                    if (strings[kv[k]] == "highway" && strings[kv[k + 1]] == "stop") isStop = true
+                    val key = strings[kv[k]]
+                    val v = strings[kv[k + 1]]
+                    when (key) {
+                        "highway" -> if (v == "stop") isStop = true
+                        "name" -> name = v
+                        "place" -> place = v
+                        "addr:housenumber" -> house = v
+                        "amenity" -> amenity = v
+                        "shop" -> shop = v
+                        "tourism" -> tourism = v
+                    }
                     k += 2
                 }
                 k++
+                one[0] = latE7
+                oneLon[0] = lonE7
                 if (isStop) {
-                    one[0] = latE7
-                    oneLon[0] = lonE7
                     emit(MapStore.T_STOP, 0, 0, one, oneLon, 1)
                     stopCount++
+                }
+                if (name != null && place != null) {
+                    val rank = when (place) {
+                        "city" -> 1; "town" -> 2; "village" -> 3; "hamlet" -> 4; "suburb" -> 5; else -> 0
+                    }
+                    if (rank > 0) emit(MapStore.T_PLACE, rank, 0, one, oneLon, 1, name)
+                } else if (name != null && (amenity != null || shop != null || tourism != null)) {
+                    val cat = when {
+                        amenity in foodAmenity -> 1
+                        shop != null -> 2
+                        amenity == "fuel" -> 3
+                        tourism == "hotel" || tourism == "motel" || tourism == "hostel" -> 4
+                        amenity == "hospital" || amenity == "pharmacy" || amenity == "clinic" || amenity == "doctors" -> 5
+                        else -> 6
+                    }
+                    emit(MapStore.T_POI, cat, 0, one, oneLon, 1, name)
+                } else if (house != null) {
+                    emit(MapStore.T_HOUSE, 0, 0, one, oneLon, 1, house)
                 }
             }
         }
     }
+
+    private val foodAmenity = setOf("restaurant", "cafe", "fast_food", "bar", "pub", "ice_cream", "food_court")
 
     private fun parseSpeed(v: String): Int {
         val digits = v.takeWhile { it.isDigit() }
@@ -452,6 +505,10 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
         var natural: String? = null
         var lanes = 0
         var speed = 0
+        var wayName: String? = null
+        var wayRef: String? = null
+        var building: String? = null
+        var house: String? = null
         for (i in keys.indices) {
             val k = strings[keys[i]]
             val v = strings[vals[i]]
@@ -460,6 +517,10 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
                 "surface" -> surface = v
                 "waterway" -> waterway = v
                 "natural" -> natural = v
+                "name" -> wayName = v
+                "ref" -> wayRef = v
+                "building" -> building = v
+                "addr:housenumber" -> house = v
                 "lanes" -> lanes = v.toIntOrNull() ?: 0
                 "maxspeed" -> speed = parseSpeed(v)
             }
@@ -482,6 +543,8 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
             type = MapStore.T_WATER
         } else if (natural == "water") {
             type = MapStore.T_WATER
+        } else if (building != null && building != "no") {
+            type = MapStore.T_BUILD
         }
         if (type < 0) return
         openNodes()
@@ -501,6 +564,7 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
         }
         if (n < 2) return
         wayCount++
-        emit(type, lanes, speed, lat, lon, n)
+        val label = if (type <= MapStore.T_TRAIL) (wayName ?: wayRef?.substringBefore(';')) else if (type == MapStore.T_BUILD) house else null
+        emit(type, lanes, speed, lat, lon, n, label)
     }
 }

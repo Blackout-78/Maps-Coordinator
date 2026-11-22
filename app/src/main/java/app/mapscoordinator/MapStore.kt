@@ -14,7 +14,7 @@ import java.io.FileInputStream
 object MapStore {
     const val CELL_E7 = 200000
 
-    class Poly(val type: Int, val lanes: Int, val speed: Int, val lat: IntArray, val lon: IntArray)
+    class Poly(val type: Int, val lanes: Int, val speed: Int, val lat: IntArray, val lon: IntArray, val name: String? = null)
 
     // type codes
     const val T_MOTORWAY = 0
@@ -27,6 +27,10 @@ object MapStore {
     const val T_TRAIL = 8
     const val T_WATER = 9
     const val T_STOP = 10
+    const val T_PLACE = 11   // city/town name, lanes = rank 1 city .. 5 suburb
+    const val T_POI = 12     // business, lanes = category (detail file)
+    const val T_HOUSE = 13   // house number point (detail file)
+    const val T_BUILD = 14   // building outline, name = house number (detail file)
 
     fun dir(ctx: Context): File {
         val d = File(ctx.filesDir, "maps")
@@ -36,18 +40,24 @@ object MapStore {
 
     fun cellFile(ctx: Context, cx: Int, cy: Int): File = File(dir(ctx), "${cy}_${cx}.t")
 
-    fun loadCell(ctx: Context, cx: Int, cy: Int): List<Poly> {
-        val f = cellFile(ctx, cx, cy)
+    fun loadCell(ctx: Context, cx: Int, cy: Int): List<Poly> = loadFile(File(dir(ctx), "${cy}_${cx}.t"))
+
+    /** Buildings, house numbers and businesses: only loaded when zoomed in. */
+    fun loadDetail(ctx: Context, cx: Int, cy: Int): List<Poly> = loadFile(File(dir(ctx), "${cy}_${cx}.d"))
+
+    private fun loadFile(f: File): List<Poly> {
         if (!f.exists()) return emptyList()
         val out = ArrayList<Poly>()
         try {
             DataInputStream(BufferedInputStream(FileInputStream(f), 1 shl 16)).use { inp ->
                 while (true) {
-                    val type = try {
+                    val rawType = try {
                         inp.readUnsignedByte()
                     } catch (e: EOFException) {
                         break
                     }
+                    val type = rawType and 0x7F
+                    val named = (rawType and 0x80) != 0
                     val lanes = inp.readUnsignedByte()
                     val speed = inp.readUnsignedShort()
                     val n = inp.readUnsignedShort()
@@ -57,7 +67,14 @@ object MapStore {
                         lat[i] = inp.readInt()
                         lon[i] = inp.readInt()
                     }
-                    out.add(Poly(type, lanes, speed, lat, lon))
+                    var name: String? = null
+                    if (named) {
+                        val len = inp.readUnsignedByte()
+                        val b = ByteArray(len)
+                        inp.readFully(b)
+                        name = String(b, Charsets.UTF_8)
+                    }
+                    out.add(Poly(type, lanes, speed, lat, lon, name))
                 }
             }
         } catch (e: Exception) {
