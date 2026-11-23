@@ -736,7 +736,7 @@ class MapView(ctx: Context) : View(ctx) {
         }
         if (showContours) {
             val ft = FloatArray(z.size) { z[it] * 3.28084f }
-            val interval = Terrain.intervalFeet(rMpp)
+            val interval = Terrain.fitInterval(ft, gw, gh, Terrain.intervalFeet(rMpp))
             val major = interval * 5
             val minor = Path(); val maj = Path()
             Terrain.contours(ft, gw, gh, interval) { x1, y1, x2, y2, lv ->

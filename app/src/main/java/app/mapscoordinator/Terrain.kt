@@ -73,6 +73,18 @@ object Terrain {
         }
     }
 
+    /** Doubles the spacing until the line count is drawable (steep or noisy terrain). */
+    fun fitInterval(z: FloatArray, gw: Int, gh: Int, start: Float, maxSegs: Int = 100000): Float {
+        var iv = start
+        for (k in 0 until 4) {
+            var n = 0
+            contours(z, gw, gh, iv) { _, _, _, _, _ -> n++ }
+            if (n <= maxSegs) return iv
+            iv *= 2
+        }
+        return iv
+    }
+
     /** Contour spacing in feet for a zoom level. */
     fun intervalFeet(mpp: Double): Float = when {
         mpp < 1.5 -> 10f
