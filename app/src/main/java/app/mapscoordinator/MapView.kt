@@ -105,7 +105,7 @@ class MapView(ctx: Context) : View(ctx) {
     })
     private val scaler = ScaleGestureDetector(ctx, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
         override fun onScale(d: ScaleGestureDetector): Boolean {
-            mpp = (mpp / d.scaleFactor).coerceIn(0.3, 600.0)
+            mpp = (mpp / d.scaleFactor).coerceIn(0.1, 600.0)
             invalidate()
             return true
         }
@@ -122,7 +122,7 @@ class MapView(ctx: Context) : View(ctx) {
     }
 
     fun zoomBy(f: Double) {
-        mpp = (mpp / f).coerceIn(0.3, 600.0)
+        mpp = (mpp / f).coerceIn(0.1, 600.0)
         invalidate()
     }
 
@@ -630,7 +630,7 @@ class MapView(ctx: Context) : View(ctx) {
     private fun drawLaneLines(c: Canvas, list: List<MapStore.Poly>, roadPx: Float, w: Float, h: Float,
                               cLat: Double, cLon: Double, kx: Double, ky: Double) {
         if (list.isEmpty() || roadPx < 9f) return
-        val dash = DashPathEffect(floatArrayOf(16f, 18f), 0f)
+        val dash = DashPathEffect(floatArrayOf(26f, 22f), 0f)
         lanePathY.reset(); lanePathW.reset()
         var any = false
         for (p in list) {
@@ -657,7 +657,7 @@ class MapView(ctx: Context) : View(ctx) {
             for (k in 1 until lanes) {
                 val off = (k - lanes / 2.0).toFloat() * laneW
                 val yellow = even && k == lanes / 2
-                val offs = if (yellow) floatArrayOf(-1.6f, 1.6f) else floatArrayOf(off)
+                val offs = if (yellow) floatArrayOf(-2.6f, 2.6f) else floatArrayOf(off)
                 for (o in offs) {
                     val pa = if (yellow) lanePathY else lanePathW
                     for (i in 0 until n) {
@@ -669,7 +669,8 @@ class MapView(ctx: Context) : View(ctx) {
             }
         }
         if (!any) return
-        paint.strokeWidth = 1.4f
+        val sw = (0.18 / rMpp).toFloat().coerceIn(2.2f, 5f)
+        paint.strokeWidth = sw
         paint.pathEffect = null
         paint.color = Color.parseColor("#F2B632")
         c.drawPath(lanePathY, paint)
