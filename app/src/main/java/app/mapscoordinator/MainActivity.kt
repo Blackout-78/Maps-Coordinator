@@ -263,6 +263,31 @@ class MainActivity : Activity(), LocationListener {
         }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
         col.addView(mapsCard)
 
+        section("MAP DISPLAY")
+        val dCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = card()
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+        }
+        val prefs = getSharedPreferences("display", Context.MODE_PRIVATE)
+        fun toggle(title: String, note: String, key: String, def: Boolean, apply: (Boolean) -> Unit) {
+            val st = prefs.getBoolean(key, def)
+            apply(st)
+            val b = button("$title: " + (if (st) "On" else "Off"), false) { }
+            b.setOnClickListener {
+                val now = !prefs.getBoolean(key, def)
+                prefs.edit().putBoolean(key, now).apply()
+                apply(now)
+                b.text = "$title: " + (if (now) "On" else "Off")
+                map.redraw()
+            }
+            dCard.addView(b, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
+            dCard.addView(label(note, 12f, SUB).apply { setPadding(0, dp(2), 0, dp(6)) })
+        }
+        toggle("Lane lines", "Yellow centre line and white dashes on roads with 2+ lanes, when zoomed in.", "lanes", true) { map.showLanes = it }
+        toggle("Stop sign dots", "Red dots on stop signs. Off by default.", "stops", false) { map.showStops = it }
+        col.addView(dCard)
+
         val crashFile = java.io.File(filesDir, "crash.txt")
         if (crashFile.exists()) {
             section("LAST CRASH")

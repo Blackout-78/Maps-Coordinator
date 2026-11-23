@@ -27,6 +27,11 @@ class MapView(ctx: Context) : View(ctx) {
     var centerLon = -112.0740
     var mpp = 4.0 // metres per pixel
     var follow = true
+    var showStops = false
+    var showLanes = true
+    fun redraw() { mapDirty = true; invalidate() }
+    private val lanePathY = Path()
+    private val lanePathW = Path()
     var hasMark = false
     var markLat = 0.0
     var markLon = 0.0
@@ -483,17 +488,12 @@ class MapView(ctx: Context) : View(ctx) {
                 drawLines(c, byType[t], casing, px + 3f, null, w, h, cLat, cLon, kx, ky)
                 drawLines(c, byType[t], roadFill[t], px, null, w, h, cLat, cLon, kx, ky)
             }
-            // lane centre line when zoomed in on a road with 2+ lanes
-            if (rMpp < 2.5) {
-                val dash = DashPathEffect(floatArrayOf(18f, 14f), 0f)
-                for (t in 0..4) {
-                    val list = ArrayList<MapStore.Poly>()
-                    for (p in byType[t]) if (p.lanes >= 2) list.add(p)
-                    drawLines(c, list, Color.parseColor("#F2B632"), 1.6f, dash, w, h, cLat, cLon, kx, ky)
-                }
+            // lane lines: yellow double centre line on even lane counts, white dashes between same-way lanes
+            if (showLanes && rMpp < 3) {
+                for (t in 0..4) drawLaneLines(c, byType[t], (widthM[t] / rMpp).toFloat(), w, h, cLat, cLon, kx, ky)
             }
             // stop signs
-            if (rMpp < 5) {
+            if (showStops && rMpp < 5) {
                 for (p in byType[MapStore.T_STOP]) {
                     val x = (w / 2 + (p.lon[0] - cLon) * kx).toFloat()
                     val y = (h / 2 - (p.lat[0] - cLat) * ky).toFloat()
@@ -625,6 +625,59 @@ class MapView(ctx: Context) : View(ctx) {
             c.drawCircle(0f, 0f, 6f, gpsFill)
             c.restore()
         }
+    }
+
+    private fun drawLaneLines(c: Canvas, list: List<MapStore.Poly>, roadPx: Float, w: Float, h: Float,
+                              cLat: Double, cLon: Double, kx: Double, ky: Double) {
+        if (list.isEmpty() || roadPx < 9f) return
+        val dash = DashPathEffect(floatArrayOf(16f, 18f), 0f)
+        lanePathY.reset(); lanePathW.reset()
+        var any = false
+        for (p in list) {
+            val n = p.lat.size
+            val lanes = p.lanes
+            if (lanes < 2 || n < 2) continue
+            val laneW = roadPx / lanes
+            if (laneW < 4.5f) continue
+            val xs = FloatArray(n); val ys = FloatArray(n)
+            for (i in 0 until n) {
+                xs[i] = (w / 2 + (p.lon[i] - cLon) * kx).toFloat()
+                ys[i] = (h / 2 - (p.lat[i] - cLat) * ky).toFloat()
+            }
+            // unit normals per vertex (average of the two neighbouring segments)
+            val nx = FloatArray(n); val ny = FloatArray(n)
+            for (i in 0 until n) {
+                var ax = 0f; var ay = 0f
+                if (i > 0) { val dx = xs[i] - xs[i - 1]; val dy = ys[i] - ys[i - 1]; val l = Math.hypot(dx.toDouble(), dy.toDouble()).toFloat(); if (l > 0f) { ax += -dy / l; ay += dx / l } }
+                if (i < n - 1) { val dx = xs[i + 1] - xs[i]; val dy = ys[i + 1] - ys[i]; val l = Math.hypot(dx.toDouble(), dy.toDouble()).toFloat(); if (l > 0f) { ax += -dy / l; ay += dx / l } }
+                val l = Math.hypot(ax.toDouble(), ay.toDouble()).toFloat()
+                if (l < 0.3f) { nx[i] = 0f; ny[i] = 0f } else { nx[i] = ax / l; ny[i] = ay / l }
+            }
+            val even = lanes % 2 == 0
+            for (k in 1 until lanes) {
+                val off = (k - lanes / 2.0).toFloat() * laneW
+                val yellow = even && k == lanes / 2
+                val offs = if (yellow) floatArrayOf(-1.6f, 1.6f) else floatArrayOf(off)
+                for (o in offs) {
+                    val pa = if (yellow) lanePathY else lanePathW
+                    for (i in 0 until n) {
+                        val x = xs[i] + nx[i] * o; val y = ys[i] + ny[i] * o
+                        if (i == 0) pa.moveTo(x, y) else pa.lineTo(x, y)
+                    }
+                    any = true
+                }
+            }
+        }
+        if (!any) return
+        paint.strokeWidth = 1.4f
+        paint.pathEffect = null
+        paint.color = Color.parseColor("#F2B632")
+        c.drawPath(lanePathY, paint)
+        paint.pathEffect = dash
+        paint.color = Color.parseColor("#C9D4F0")
+        c.drawPath(lanePathW, paint)
+        paint.pathEffect = null
+        lanePathY.reset(); lanePathW.reset()
     }
 
     private fun drawLines(c: Canvas, list: List<MapStore.Poly>, color: Int, width: Float, effect: DashPathEffect?,
