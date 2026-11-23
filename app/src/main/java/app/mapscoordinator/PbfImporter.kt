@@ -126,6 +126,21 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
     private val cells = HashMap<Long, ByteArrayOutputStream>()
     private val dcells = HashMap<Long, ByteArrayOutputStream>()
     private val ovr = ByteArrayOutputStream(1 shl 16)
+    private val srch = ByteArrayOutputStream(1 shl 16)
+    private val seenStreets = HashSet<Long>()
+
+    /** One line in the offline search index: kind 1 place, 2 business, 3 address, 4 street. */
+    private fun writeSearch(kind: Int, lat: Int, lon: Int, text: String) {
+        var b = text.toByteArray(Charsets.UTF_8)
+        if (b.size > 200) b = b.copyOf(200)
+        val o = DataOutputStream(srch)
+        o.writeByte(kind)
+        o.writeInt(lat)
+        o.writeInt(lon)
+        o.writeByte(b.size)
+        o.write(b)
+        bufBytes += 10L + b.size
+    }
     private var bufBytes = 0L
     private var wayCount = 0L
     private var stopCount = 0L
@@ -192,6 +207,12 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
         if (n - 1 > start) writePiece(cur, type, lanes, speed, lat, lon, start, n - 1, nameBytes)
     }
 
+    private fun centroid(a: IntArray, n: Int): Int {
+        var sum = 0L
+        for (i in 0 until n) sum += a[i]
+        return (sum / n).toInt()
+    }
+
     private fun writeOverview(type: Int, lanes: Int, speed: Int, lat: IntArray, lon: IntArray, n: Int, nameBytes: ByteArray?) {
         val ol = IntArray(n)
         val oo = IntArray(n)
@@ -233,6 +254,10 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
             FileOutputStream(File(dir, "${cy}_${cx}.d"), true).use { bo.writeTo(it) }
         }
         dcells.clear()
+        if (srch.size() > 0) {
+            FileOutputStream(File(dir, "search.idx"), true).use { srch.writeTo(it) }
+            srch.reset()
+        }
         if (ovr.size() > 0) {
             FileOutputStream(File(dir, "overview.t"), true).use { ovr.writeTo(it) }
             ovr.reset()
@@ -459,6 +484,8 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
                 var amenity: String? = null
                 var shop: String? = null
                 var tourism: String? = null
+                var street: String? = null
+                var city: String? = null
                 while (k < kv.size && kv[k] != 0) {
                     val key = strings[kv[k]]
                     val v = strings[kv[k + 1]]
@@ -470,6 +497,8 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
                         "amenity" -> amenity = v
                         "shop" -> shop = v
                         "tourism" -> tourism = v
+                        "addr:street" -> street = v
+                        "addr:city" -> city = v
                     }
                     k += 2
                 }
@@ -484,7 +513,7 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
                     val rank = when (place) {
                         "city" -> 1; "town" -> 2; "village" -> 3; "hamlet" -> 4; "suburb" -> 5; else -> 0
                     }
-                    if (rank > 0) emit(MapStore.T_PLACE, rank, 0, one, oneLon, 1, name)
+                    if (rank > 0) { emit(MapStore.T_PLACE, rank, 0, one, oneLon, 1, name); writeSearch(1, latE7, lonE7, name) }
                 } else if (name != null && (amenity != null || shop != null || tourism != null)) {
                     val cat = when {
                         amenity in foodAmenity -> 1
@@ -495,8 +524,10 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
                         else -> 6
                     }
                     emit(MapStore.T_POI, cat, 0, one, oneLon, 1, name)
+                    writeSearch(2, latE7, lonE7, name)
                 } else if (house != null) {
                     emit(MapStore.T_HOUSE, 0, 0, one, oneLon, 1, house)
+                    if (street != null) writeSearch(3, latE7, lonE7, if (city != null) "$house $street, $city" else "$house $street")
                 }
             }
         }
@@ -542,6 +573,9 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
         var wayRef: String? = null
         var building: String? = null
         var house: String? = null
+        var wStreet: String? = null
+        var wCity: String? = null
+        var wPoi = false
         for (i in keys.indices) {
             val k = strings[keys[i]]
             val v = strings[vals[i]]
@@ -553,6 +587,9 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
                 "name" -> wayName = v
                 "ref" -> wayRef = v
                 "building" -> building = v
+                "addr:street" -> wStreet = v
+                "addr:city" -> wCity = v
+                "amenity", "shop", "tourism" -> wPoi = true
                 "addr:housenumber" -> house = v
                 "lanes" -> lanes = v.toIntOrNull() ?: 0
                 "maxspeed" -> speed = parseSpeed(v)
@@ -579,7 +616,8 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
         } else if (building != null && building != "no") {
             type = MapStore.T_BUILD
         }
-        if (type < 0) return
+        val poiArea = type < 0 && wayName != null && wPoi
+        if (type < 0 && !poiArea) return
         openNodes()
         val lat = IntArray(refs.size)
         val lon = IntArray(refs.size)
@@ -596,6 +634,21 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
             }
         }
         if (n < 2) return
+        if (poiArea) {
+            writeSearch(2, centroid(lat, n), centroid(lon, n), wayName!!)
+            return
+        }
+        val sName = wayName ?: wayRef?.substringBefore(';')
+        if (type <= MapStore.T_TRAIL && sName != null) {
+            val key = sName.hashCode().toLong() * 1000003L + cellKey(lat[n / 2], lon[n / 2])
+            if (seenStreets.add(key)) writeSearch(4, lat[n / 2], lon[n / 2], sName)
+        } else if (type == MapStore.T_BUILD) {
+            if (house != null && wStreet != null) {
+                writeSearch(3, centroid(lat, n), centroid(lon, n), if (wCity != null) "$house $wStreet, $wCity" else "$house $wStreet")
+            } else if (wayName != null && wPoi) {
+                writeSearch(2, centroid(lat, n), centroid(lon, n), wayName)
+            }
+        }
         wayCount++
         val label = if (type <= MapStore.T_TRAIL) (wayName ?: wayRef?.substringBefore(';')) else if (type == MapStore.T_BUILD) house else null
         emit(type, lanes, speed, lat, lon, n, label)

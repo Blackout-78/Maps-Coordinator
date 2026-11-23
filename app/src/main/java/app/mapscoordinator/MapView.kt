@@ -27,6 +27,11 @@ class MapView(ctx: Context) : View(ctx) {
     var centerLon = -112.0740
     var mpp = 4.0 // metres per pixel
     var follow = true
+    var hasMark = false
+    var markLat = 0.0
+    var markLon = 0.0
+    fun setMark(lat: Double, lon: Double) { markLat = lat; markLon = lon; hasMark = true; invalidate() }
+    fun clearMark() { hasMark = false; invalidate() }
     var hasFix = false
     var myLat = 0.0
     var myLon = 0.0
@@ -586,6 +591,15 @@ class MapView(ctx: Context) : View(ctx) {
                 }
             }
             if (needs) requestRender()
+        }
+
+        if (hasMark) {
+            val mx = (w / 2 + (markLon * 1e7 - cLon) * kx).toFloat()
+            val my = (h / 2 - (markLat * 1e7 - cLat) * ky).toFloat()
+            gpsFill.color = Color.parseColor("#F2B632")
+            c.drawCircle(mx, my, 11f, gpsFill)
+            gpsFill.color = Color.parseColor("#0E1424")
+            c.drawCircle(mx, my, 4.5f, gpsFill)
         }
 
         if (hasFix) {

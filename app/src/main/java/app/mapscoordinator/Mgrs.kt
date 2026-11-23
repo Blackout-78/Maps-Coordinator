@@ -58,4 +58,67 @@ object Mgrs {
         val nn = (floor(y).toLong() % 100000L).toInt()
         return String.format("%d%c %c%c %05d %05d", zone, band, colSet[ci], ROWS[abs(ri)], e, nn)
     }
+
+    /** Reads an MGRS grid like "12S VC 00179 01514" and returns (lat, lon), or null if it is not one. */
+    fun parse(text: String): Pair<Double, Double>? {
+        val t = text.uppercase().replace(" ", "").replace("-", "")
+        val mt = Regex("^(\\d{1,2})([C-HJ-NP-X])([A-HJ-NP-Z])([A-HJ-NP-V])(\\d{2,10})$").find(t) ?: return null
+        val zone = mt.groupValues[1].toInt()
+        if (zone < 1 || zone > 60) return null
+        val band = mt.groupValues[2][0]
+        val colL = mt.groupValues[3][0]
+        val rowL = mt.groupValues[4][0]
+        val digits = mt.groupValues[5]
+        if (digits.length % 2 != 0) return null
+        val half = digits.length / 2
+        val scale = 10.0.pow(5 - half)
+        val e = digits.substring(0, half).toDouble() * scale + scale / 2
+        val n = digits.substring(half).toDouble() * scale + scale / 2
+        val colIdx = COLS[(zone - 1) % 3].indexOf(colL)
+        if (colIdx < 0) return null
+        val easting = (colIdx + 1) * 100000.0 + e
+        val rowIdx = ROWS.indexOf(rowL)
+        if (rowIdx < 0) return null
+        val bandIdx = BANDS.indexOf(band)
+        val north = band >= 'N'
+        val base = ((rowIdx - (if (zone % 2 == 0) 5 else 0)) % 20 + 20) % 20 * 100000.0
+        for (k in 0..4) {
+            val nn = k * 2000000.0 + base + n
+            val ll = utmToLatLon(zone, north, easting, nn) ?: continue
+            val minLat = -80.0 + 8.0 * bandIdx
+            val maxLat = if (bandIdx == 19) 84.0 else minLat + 8.0
+            if (ll.first >= minLat - 0.0001 && ll.first <= maxLat + 0.0001) return ll
+        }
+        return null
+    }
+
+    private fun utmToLatLon(zone: Int, north: Boolean, easting: Double, northing: Double): Pair<Double, Double>? {
+        val e2 = F * (2 - F)
+        val ep2 = e2 / (1 - e2)
+        val x = easting - 500000.0
+        val y = if (north) northing else northing - 10000000.0
+        val m = y / K0
+        val mu = m / (A * (1 - e2 / 4 - 3 * e2.pow(2) / 64 - 5 * e2.pow(3) / 256))
+        val e1 = (1 - sqrt(1 - e2)) / (1 + sqrt(1 - e2))
+        val phi1 = mu + (3 * e1 / 2 - 27 * e1.pow(3) / 32) * sin(2 * mu) +
+                (21 * e1.pow(2) / 16 - 55 * e1.pow(4) / 32) * sin(4 * mu) +
+                (151 * e1.pow(3) / 96) * sin(6 * mu) + (1097 * e1.pow(4) / 512) * sin(8 * mu)
+        val sp = sin(phi1)
+        val cp = cos(phi1)
+        val tp = tan(phi1)
+        val n1 = A / sqrt(1 - e2 * sp * sp)
+        val t1 = tp * tp
+        val c1 = ep2 * cp * cp
+        val r1 = A * (1 - e2) / (1 - e2 * sp * sp).pow(1.5)
+        val d = x / (n1 * K0)
+        val lat = phi1 - (n1 * tp / r1) * (d * d / 2 - (5 + 3 * t1 + 10 * c1 - 4 * c1 * c1 - 9 * ep2) * d.pow(4) / 24 +
+                (61 + 90 * t1 + 298 * c1 + 45 * t1 * t1 - 252 * ep2 - 3 * c1 * c1) * d.pow(6) / 720)
+        val lon0 = Math.toRadians(((zone - 1) * 6 - 180 + 3).toDouble())
+        val lon = lon0 + (d - (1 + 2 * t1 + c1) * d.pow(3) / 6 +
+                (5 - 2 * c1 + 28 * t1 - 3 * c1 * c1 + 8 * ep2 + 24 * t1 * t1) * d.pow(5) / 120) / cp
+        val la = Math.toDegrees(lat)
+        val lo = Math.toDegrees(lon)
+        if (la.isNaN() || lo.isNaN()) return null
+        return Pair(la, lo)
+    }
 }

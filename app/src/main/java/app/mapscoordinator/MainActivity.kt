@@ -56,6 +56,12 @@ class MainActivity : Activity(), LocationListener {
     private lateinit var mapScreen: FrameLayout
     private var lastLocation: Location? = null
     private var importing = false
+    private lateinit var searchView: LinearLayout
+    private lateinit var searchBox: android.widget.EditText
+    private lateinit var searchList: LinearLayout
+    private lateinit var searchNote: TextView
+    private var searchGen = 0
+    private val searchRun = Runnable { runSearch() }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
@@ -172,11 +178,14 @@ class MainActivity : Activity(), LocationListener {
         }
         val recenter = button("Recenter", true) { recenter() }
         val copy = button("Copy grid", false) { copyGrid() }
+        val find = button("Search", false) { showSearch(true) }
         val settings = button("Settings", false) { showSettings(true) }
+        for (b in listOf(recenter, copy, find, settings)) { b.setPadding(dp(2), 0, dp(2), 0); b.textSize = 12.5f; b.isSingleLine = true }
         val bl = LinearLayout.LayoutParams(0, -2, 1f)
         bl.setMargins(dp(3), 0, dp(3), 0)
         bottom.addView(recenter, bl)
         bottom.addView(copy, bl)
+        bottom.addView(find, bl)
         bottom.addView(settings, bl)
         val bottomLp = FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM)
         bottomLp.setMargins(dp(12), 0, dp(12), dp(26))
@@ -188,6 +197,10 @@ class MainActivity : Activity(), LocationListener {
         buildSettings()
         root.addView(settingsView, FrameLayout.LayoutParams(-1, -1))
         settingsView.visibility = View.GONE
+
+        buildSearch()
+        root.addView(searchView, FrameLayout.LayoutParams(-1, -1))
+        searchView.visibility = View.GONE
 
         // import progress overlay
         progressView = label("", 16f, TEXT, true).apply {
@@ -308,6 +321,101 @@ class MainActivity : Activity(), LocationListener {
         settingsView = sv
     }
 
+    private fun buildSearch() {
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(NAVY)
+            setPadding(dp(16), dp(40), dp(16), dp(16))
+        }
+        col.addView(label("Search", 22f, TEXT, true))
+        col.addView(label("Address, place, street, coordinates or MGRS grid", 12f, DIM),
+            LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) })
+        searchBox = android.widget.EditText(this).apply {
+            hint = "e.g. 100 Main St, coffee, 33.4484 -112.074"
+            setHintTextColor(DIM)
+            setTextColor(TEXT)
+            textSize = 16f
+            setSingleLine(true)
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
+            background = GradientDrawable().apply { setColor(CARD); setStroke(dp(1), BORDER); cornerRadius = dp(12).toFloat() }
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun afterTextChanged(s: android.text.Editable?) { removeCallbacks(searchRun); postDelayed(searchRun, 350) }
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            })
+        }
+        col.addView(searchBox, LinearLayout.LayoutParams(-1, -2))
+        searchNote = label("", 12f, DIM)
+        col.addView(searchNote, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        searchList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val sc = ScrollView(this)
+        sc.addView(searchList, ViewGroup.LayoutParams(-1, -2))
+        col.addView(sc, LinearLayout.LayoutParams(-1, 0, 1f))
+        col.addView(button("Back to map", false) { showSearch(false) }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        searchView = col
+    }
+
+    private fun showSearch(show: Boolean) {
+        searchView.visibility = if (show) View.VISIBLE else View.GONE
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+        if (show) {
+            searchBox.requestFocus()
+            imm.showSoftInput(searchBox, 0)
+            searchNote.text = if (Search.hasIndex(this)) "" else "No search index yet. Re-import your map once to build it. Coordinates and MGRS work now."
+        } else {
+            imm.hideSoftInputFromWindow(searchBox.windowToken, 0)
+        }
+    }
+
+    private fun addResult(title: String, sub: String, lat: Double, lon: Double) {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = card()
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            setOnClickListener { goTo(lat, lon) }
+        }
+        row.addView(label(title, 15f, TEXT, true))
+        row.addView(label(sub, 11f, DIM))
+        searchList.addView(row, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+    }
+
+    private fun goTo(lat: Double, lon: Double) {
+        map.follow = false
+        map.centerLat = lat
+        map.centerLon = lon
+        if (map.mpp > 4.0 || map.mpp < 1.0) map.mpp = 2.0
+        map.setMark(lat, lon)
+        showSearch(false)
+    }
+
+    private fun runSearch() {
+        val q = searchBox.text.toString().trim()
+        val gen = ++searchGen
+        searchList.removeAllViews()
+        if (q.isEmpty()) { searchNote.text = ""; return }
+        val c = Search.parseCoords(q)
+        if (c != null) {
+            addResult("Go to " + String.format("%.5f, %.5f", c.first, c.second), Mgrs.format(c.first, c.second), c.first, c.second)
+        }
+        if (!Search.hasIndex(this)) return
+        searchNote.text = "Searching…"
+        val cl = map.centerLat
+        val cn = map.centerLon
+        Thread {
+            val hits = Search.run(this, q, cl, cn, { gen != searchGen })
+            runOnUiThread {
+                if (gen != searchGen) return@runOnUiThread
+                searchNote.text = if (hits.isEmpty() && c == null) "No matches." else ""
+                for (h in hits) {
+                    val kindName = when (h.kind) { 1 -> "Place"; 2 -> "Business"; 3 -> "Address"; else -> "Street" }
+                    val dist = if (h.km < 10) String.format("%.1f km", h.km) else String.format("%.0f km", h.km)
+                    addResult(h.text, "$kindName · $dist from map centre · " + Mgrs.format(h.lat, h.lon), h.lat, h.lon)
+                }
+            }
+        }.start()
+    }
+
     private fun showSettings(show: Boolean) {
         settingsView.visibility = if (show) View.VISIBLE else View.GONE
         if (show) refreshMapState()
@@ -316,7 +424,8 @@ class MainActivity : Activity(), LocationListener {
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         if (importing) return
-        if (settingsView.visibility == View.VISIBLE) showSettings(false) else super.onBackPressed()
+        if (searchView.visibility == View.VISIBLE) showSearch(false)
+        else if (settingsView.visibility == View.VISIBLE) showSettings(false) else super.onBackPressed()
     }
 
     private fun refreshMapState() {
@@ -348,7 +457,7 @@ class MainActivity : Activity(), LocationListener {
             map.centerLat = l.latitude
             map.centerLon = l.longitude
             map.follow = true
-            map.invalidate()
+            map.clearMark()
         } else {
             Toast.makeText(this, "No GPS fix yet", Toast.LENGTH_SHORT).show()
         }
