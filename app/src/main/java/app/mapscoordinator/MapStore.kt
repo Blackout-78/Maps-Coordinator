@@ -47,6 +47,7 @@ object MapStore {
     const val T_PLACE = 11   // city/town name, lanes = rank 1 city .. 5 suburb
     const val T_POI = 12     // business, lanes = category (detail file)
     const val T_HOUSE = 13   // house number point (detail file)
+    const val T_ARROW = 15   // lane turn arrow: 2 points (start, stop line), name = turn:lanes, speed = road type (detail file)
     const val T_BUILD = 14   // building outline, name = house number (detail file)
 
     fun dir(ctx: Context): File {

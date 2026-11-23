@@ -158,7 +158,7 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
     private fun writePiece(key: Long, type: Int, lanes: Int, speed: Int,
                            lat: IntArray, lon: IntArray, from: Int, toInclusive: Int, nameBytes: ByteArray?) {
         val count = toInclusive - from + 1
-        val bo = (if (type in 12..14) dcells else cells).getOrPut(key) { ByteArrayOutputStream(1024) }
+        val bo = (if (type in 12..15) dcells else cells).getOrPut(key) { ByteArrayOutputStream(1024) }
         val o = DataOutputStream(bo)
         o.writeByte(if (nameBytes != null) (type or 0x80) else type)
         o.writeByte(if (lanes > 255) 255 else lanes)
@@ -576,6 +576,10 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
         var wStreet: String? = null
         var wCity: String? = null
         var wPoi = false
+        var bHeight = 0
+        var bLevels = 0
+        var turnF: String? = null
+        var turnB: String? = null
         for (i in keys.indices) {
             val k = strings[keys[i]]
             val v = strings[vals[i]]
@@ -591,6 +595,10 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
                 "addr:city" -> wCity = v
                 "amenity", "shop", "tourism" -> wPoi = true
                 "addr:housenumber" -> house = v
+                "height" -> bHeight = Math.round(v.trim().takeWhile { it.isDigit() || it == '.' }.toDoubleOrNull() ?: 0.0).toInt()
+                "building:levels" -> bLevels = v.trim().toDoubleOrNull()?.toInt() ?: 0
+                "turn:lanes", "turn:lanes:forward" -> turnF = v
+                "turn:lanes:backward" -> turnB = v
                 "lanes" -> lanes = v.toIntOrNull() ?: 0
                 "maxspeed" -> speed = parseSpeed(v)
             }
@@ -651,6 +659,47 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
         }
         wayCount++
         val label = if (type <= MapStore.T_TRAIL) (wayName ?: wayRef?.substringBefore(';')) else if (type == MapStore.T_BUILD) house else null
+        if (type == MapStore.T_BUILD) speed = if (bHeight > 0) minOf(bHeight, 500) else if (bLevels > 0) minOf(bLevels * 3, 500) else 0
         emit(type, lanes, speed, lat, lon, n, label)
+        if (type <= MapStore.T_SERVICE) {
+            val tf = turnF
+            val tb = turnB
+            if (tf != null) emitArrow(lat, lon, n, true, tf, type, lanes)
+            if (tb != null) emitArrow(lat, lon, n, false, tb, type, lanes)
+        }
+    }
+
+    /** Lane turn arrow about 14 m before the end of a way (forward) or its start (backward). */
+    private fun emitArrow(lat: IntArray, lon: IntArray, n: Int, forward: Boolean, turn: String, roadType: Int, lanes: Int) {
+        if (turn.isEmpty() || turn.length > 100) return
+        val kx = 1e-7 * 111320.0 * Math.cos(Math.toRadians(lat[n / 2] / 1e7))
+        val ky = 1e-7 * 110574.0
+        val order = if (forward) (n - 1 downTo 0) else (0 until n)
+        val idx = order.toList()
+        var acc = 0.0
+        var ax = 0; var ay = 0
+        var found = false
+        for (k in 1 until idx.size) {
+            val p = idx[k - 1]; val q = idx[k]
+            val dx = (lon[q] - lon[p]) * kx
+            val dy = (lat[q] - lat[p]) * ky
+            val l = Math.sqrt(dx * dx + dy * dy)
+            if (acc + l >= 14.0 && l > 0) {
+                val f = (14.0 - acc) / l
+                ay = (lat[p] + (lat[q] - lat[p]) * f).toInt()
+                ax = (lon[p] + (lon[q] - lon[p]) * f).toInt()
+                found = true
+                break
+            }
+            acc += l
+        }
+        if (!found) return
+        val end = idx[0]
+        val la = intArrayOf(ay, lat[end])
+        val lo = intArrayOf(ax, lon[end])
+        val count = turn.split('|').size
+        var b = turn.toByteArray(Charsets.UTF_8)
+        if (b.size > 120) b = b.copyOf(120)
+        writePiece(cellKey(lat[end], lon[end]), MapStore.T_ARROW, if (lanes > 0) lanes else count, roadType, la, lo, 0, 1, b)
     }
 }

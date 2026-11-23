@@ -34,6 +34,8 @@ class MainActivity : Activity(), LocationListener {
     companion object {
         const val REQ_PERM = 1
         const val REQ_PICK = 2
+        const val REQ_DEM = 3
+        const val M2FT = 3.28084
         const val RELEASES_URL = "https://github.com/Blackout-78/Maps-Coordinator/releases"
         val NAVY = Color.parseColor("#0E1424")
         val CARD = Color.parseColor("#141B30")
@@ -61,6 +63,12 @@ class MainActivity : Activity(), LocationListener {
     private lateinit var searchList: LinearLayout
     private lateinit var searchNote: TextView
     private var searchGen = 0
+    private lateinit var wpView: LinearLayout
+    private lateinit var wpSummary: TextView
+    private lateinit var wpProfile: ProfileView
+    private lateinit var wpList: LinearLayout
+    private lateinit var demStats: TextView
+    private val wps = ArrayList<Route.Wp>()
     private val searchRun = Runnable { runSearch() }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
@@ -165,6 +173,8 @@ class MainActivity : Activity(), LocationListener {
         val zoom = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         zoom.addView(roundButton("+") { map.zoomBy(1.6) })
         zoom.addView(roundButton("−") { map.zoomBy(1 / 1.6) })
+        zoom.addView(roundButton("3D") { map.tilt = !map.tilt }.apply { textSize = 14f })
+        zoom.addView(roundButton("★") { showWps(true) }.apply { textSize = 18f })
         val zoomLp = FrameLayout.LayoutParams(-2, -2, Gravity.END or Gravity.CENTER_VERTICAL)
         zoomLp.setMargins(0, 0, dp(12), 0)
         mapScreen.addView(zoom, zoomLp)
@@ -202,6 +212,11 @@ class MainActivity : Activity(), LocationListener {
         root.addView(searchView, FrameLayout.LayoutParams(-1, -1))
         searchView.visibility = View.GONE
 
+        loadWps()
+        buildWps()
+        root.addView(wpView, FrameLayout.LayoutParams(-1, -1))
+        wpView.visibility = View.GONE
+
         // import progress overlay
         progressView = label("", 16f, TEXT, true).apply {
             gravity = Gravity.CENTER
@@ -213,6 +228,7 @@ class MainActivity : Activity(), LocationListener {
 
         setContentView(root)
         refreshMapState()
+        refreshDemState()
         requestLocation()
     }
 
@@ -285,6 +301,8 @@ class MainActivity : Activity(), LocationListener {
             dCard.addView(label(note, 12f, SUB).apply { setPadding(0, dp(2), 0, dp(6)) })
         }
         toggle("Lane lines", "Yellow centre line and white dashes on roads with 2+ lanes, when zoomed in.", "lanes", true) { map.showLanes = it }
+        toggle("Hill shading", "Shaded relief from elevation files. Needs imported elevation.", "terrain", true) { map.showTerrain = it }
+        toggle("Contour lines", "Elevation lines in feet with labels. Needs imported elevation.", "contours", true) { map.showContours = it }
         toggle("Stop sign dots", "Red dots on stop signs. Off by default.", "stops", false) { map.showStops = it }
         col.addView(dCard)
 
@@ -327,6 +345,23 @@ class MainActivity : Activity(), LocationListener {
         vCard.addView(label("Updates install only through GitHub. The app itself stays offline.", 12f, SUB).apply { setPadding(0, dp(6), 0, 0) })
         col.addView(vCard)
 
+        section("ELEVATION")
+        val eCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = card()
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+        }
+        demStats = label("", 14f, TEXT)
+        eCard.addView(demStats)
+        eCard.addView(label("Elevation comes from SRTM .hgt tiles (name like N33W112.hgt or N33W112.hgt.gz). Pick one or many at once.", 12f, SUB).apply { setPadding(0, dp(4), 0, dp(8)) })
+        eCard.addView(button("Import elevation file(s)", true) { pickDem() })
+        eCard.addView(button("Delete elevation", false) {
+            Dem.clear(this)
+            map.redraw()
+            refreshDemState()
+        }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        col.addView(eCard)
+
         section("CREDITS")
         val cCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -334,6 +369,7 @@ class MainActivity : Activity(), LocationListener {
             setPadding(dp(14), dp(12), dp(14), dp(12))
         }
         cCard.addView(label("Map data © OpenStreetMap contributors (ODbL).", 13f, TEXT))
+        cCard.addView(label("Elevation: NASA SRTM.", 13f, TEXT))
         col.addView(cCard)
 
         col.addView(button("Back to map", false) { showSettings(false) }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(18) })
@@ -412,6 +448,7 @@ class MainActivity : Activity(), LocationListener {
         if (map.mpp > 4.0 || map.mpp < 1.0) map.mpp = 2.0
         map.setMark(lat, lon)
         showSearch(false)
+        showWps(false)
     }
 
     private fun runSearch() {
@@ -449,7 +486,8 @@ class MainActivity : Activity(), LocationListener {
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         if (importing) return
-        if (searchView.visibility == View.VISIBLE) showSearch(false)
+        if (wpView.visibility == View.VISIBLE) showWps(false)
+        else if (searchView.visibility == View.VISIBLE) showSearch(false)
         else if (settingsView.visibility == View.VISIBLE) showSettings(false) else super.onBackPressed()
     }
 
@@ -564,6 +602,196 @@ class MainActivity : Activity(), LocationListener {
         } catch (e: Exception) { }
     }
 
+    // ---- elevation import ----
+    private fun pickDem() {
+        val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        }
+        startActivityForResult(i, REQ_DEM)
+    }
+
+    private fun refreshDemState() {
+        thread {
+            val n = Dem.tileCount(this)
+            val mb = Dem.sizeBytes(this) / (1024 * 1024)
+            runOnUiThread { demStats.text = if (n == 0) "No elevation installed." else "$n elevation tile(s) · $mb MB" }
+        }
+    }
+
+    private fun startDemImport(uris: List<Uri>) {
+        if (importing) return
+        importing = true
+        showSettings(false)
+        progressView.visibility = View.VISIBLE
+        thread {
+            var ok = 0
+            val errors = ArrayList<String>()
+            for ((k, u) in uris.withIndex()) {
+                val (name, _) = fileInfo(u)
+                runOnUiThread { progressView.text = "Importing elevation ${k + 1} of ${uris.size}\n$name\nKeep the app open." }
+                try {
+                    val s = contentResolver.openInputStream(u) ?: throw Dem.DemException("Could not open $name")
+                    s.use { Dem.importTile(applicationContext, name, it) }
+                    ok++
+                } catch (e: Dem.DemException) {
+                    errors.add(e.message ?: "Failed")
+                } catch (e: Exception) {
+                    errors.add("$name: " + (e.message ?: e.javaClass.simpleName))
+                }
+            }
+            runOnUiThread {
+                importing = false
+                progressView.visibility = View.GONE
+                map.redraw()
+                refreshDemState()
+                val msg = "Imported $ok tile(s)" + (if (errors.isNotEmpty()) ". " + errors.first() else "")
+                Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    // ---- waypoints ----
+    private fun loadWps() {
+        try {
+            val f = java.io.File(filesDir, "waypoints.txt")
+            if (f.exists()) wps.addAll(Route.decode(f.readText()))
+        } catch (e: Exception) { }
+        map.route = ArrayList(wps)
+    }
+
+    private fun saveWps() {
+        try { java.io.File(filesDir, "waypoints.txt").writeText(Route.encode(wps)) } catch (e: Exception) { }
+        map.route = ArrayList(wps)
+    }
+
+    private fun showWps(show: Boolean) {
+        wpView.visibility = if (show) View.VISIBLE else View.GONE
+        if (show) refreshWps()
+    }
+
+    private fun miles(m: Double): String = String.format("%.1f mi (%.1f km)", m / 1609.344, m / 1000.0)
+    private fun feet(m: Double): String = String.format("%,d ft", Math.round(m * M2FT))
+
+    private fun buildWps() {
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(NAVY)
+            setPadding(dp(16), dp(40), dp(16), dp(16))
+        }
+        col.addView(label("Waypoints", 22f, TEXT, true))
+        wpSummary = label("", 13f, SUB)
+        col.addView(wpSummary, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
+        wpProfile = ProfileView(this)
+        col.addView(wpProfile, LinearLayout.LayoutParams(-1, dp(110)))
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val lp = LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(dp(3), dp(8), dp(3), dp(4)) }
+        row.addView(button("Add my position", true) {
+            val l = lastLocation
+            if (l == null) Toast.makeText(this, "No GPS fix yet", Toast.LENGTH_SHORT).show() else askWpName(l.latitude, l.longitude)
+        }, lp)
+        row.addView(button("Add map centre", false) { askWpName(map.centerLat, map.centerLon) }, lp)
+        col.addView(row)
+        wpList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val sc = ScrollView(this)
+        sc.addView(wpList, ViewGroup.LayoutParams(-1, -2))
+        col.addView(sc, LinearLayout.LayoutParams(-1, 0, 1f))
+        val bottom = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        bottom.addView(button("Clear all", false) { wps.clear(); saveWps(); refreshWps() }, lp)
+        bottom.addView(button("Back to map", false) { showWps(false) }, lp)
+        col.addView(bottom)
+        wpView = col
+    }
+
+    private fun askWpName(lat: Double, lon: Double) {
+        val et = android.widget.EditText(this).apply { setText("WP ${wps.size + 1}"); setSingleLine(true); setSelectAllOnFocus(true) }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Waypoint name")
+            .setView(et)
+            .setPositiveButton("Add") { _, _ ->
+                val n = et.text.toString().trim().ifEmpty { "WP ${wps.size + 1}" }
+                wps.add(Route.Wp(n, lat, lon))
+                saveWps()
+                refreshWps()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun refreshWps() {
+        wpList.removeAllViews()
+        val legs = Route.legs(wps)
+        val prof = Route.profile(wps, { la, lo -> Dem.elevation(la, lo) })
+        wpProfile.set(prof)
+        if (wps.isEmpty()) {
+            wpSummary.text = "No waypoints yet. Add your position, or move the map to a spot and add the map centre."
+        } else if (prof == null) {
+            wpSummary.text = "1 waypoint. Add another to draw a route."
+        } else {
+            val have = Dem.hasAny(this) && prof.elev.any { !it.isNaN() }
+            wpSummary.text = "${wps.size} waypoints · " + miles(prof.distM) +
+                (if (have) " · up ${feet(prof.upM)} · down ${feet(prof.downM)}" else " · import elevation for climb")
+        }
+        for ((i, w) in wps.withIndex()) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                background = card()
+                setPadding(dp(14), dp(8), dp(8), dp(8))
+                setOnClickListener { goTo(w.lat, w.lon) }
+            }
+            val txt = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            txt.addView(label("${i + 1}  ${w.name}", 15f, TEXT, true))
+            val e = Dem.elevation(w.lat, w.lon)
+            val sub = (if (i > 0) "leg " + miles(legs[i - 1]) + " · " else "") +
+                (if (!e.isNaN()) feet(e.toDouble()) + " · " else "") + Mgrs.format(w.lat, w.lon)
+            txt.addView(label(sub, 11f, DIM))
+            row.addView(txt, LinearLayout.LayoutParams(0, -2, 1f))
+            row.addView(button("Delete", false) { wps.removeAt(i); saveWps(); refreshWps() }.apply { minHeight = dp(36); minimumHeight = dp(36); setPadding(dp(10), 0, dp(10), 0) })
+            wpList.addView(row, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+        }
+    }
+
+    /** Elevation profile along the waypoint route. */
+    inner class ProfileView(ctx: android.content.Context) : View(ctx) {
+        private var p: Route.Profile? = null
+        private val line = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            style = android.graphics.Paint.Style.STROKE; strokeWidth = dp(2).toFloat(); color = AMBER
+        }
+        private val fill = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color = android.graphics.Color.argb(50, 242, 182, 50) }
+        private val txt = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color = DIM; textSize = dp(11).toFloat() }
+        fun set(pr: Route.Profile?) { p = pr; invalidate() }
+        override fun onDraw(c: android.graphics.Canvas) {
+            val w = width.toFloat(); val h = height.toFloat()
+            val bg = GradientDrawable().apply { setColor(CARD); setStroke(dp(1), BORDER); cornerRadius = dp(12).toFloat() }
+            bg.setBounds(0, 0, width, height); bg.draw(c)
+            val pr = p
+            if (pr == null || pr.elev.none { !it.isNaN() }) {
+                c.drawText("Elevation profile appears here (2+ waypoints and elevation imported)", dp(10).toFloat(), h / 2, txt)
+                return
+            }
+            val padL = dp(10).toFloat(); val padR = dp(10).toFloat(); val padT = dp(18).toFloat(); val padB = dp(8).toFloat()
+            val span = Math.max(1f, pr.maxM - pr.minM)
+            val total = Math.max(1f, pr.dist[pr.dist.size - 1])
+            val path = android.graphics.Path(); var open = false; var lastX = padL
+            for (i in pr.elev.indices) {
+                val e = pr.elev[i]
+                if (e.isNaN()) { open = false; continue }
+                val x = padL + pr.dist[i] / total * (w - padL - padR)
+                val y = h - padB - (e - pr.minM) / span * (h - padT - padB)
+                if (!open) { path.moveTo(x, y); open = true } else path.lineTo(x, y)
+                lastX = x
+            }
+            val area = android.graphics.Path(path)
+            area.lineTo(lastX, h - padB); area.lineTo(padL, h - padB); area.close()
+            c.drawPath(area, fill)
+            c.drawPath(path, line)
+            c.drawText(String.format("%,d ft", Math.round(pr.maxM * M2FT)), padL, padT - dp(5), txt)
+            c.drawText(String.format("%,d ft", Math.round(pr.minM * M2FT)), padL, h - padB - dp(2), txt)
+        }
+    }
+
     // ---- import ----
     private fun pickFile() {
         val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
@@ -579,6 +807,13 @@ class MainActivity : Activity(), LocationListener {
         if (requestCode == REQ_PICK && resultCode == RESULT_OK) {
             val uri = data?.data ?: return
             startImport(uri)
+        }
+        if (requestCode == REQ_DEM && resultCode == RESULT_OK) {
+            val uris = ArrayList<Uri>()
+            val cd = data?.clipData
+            if (cd != null) for (i in 0 until cd.itemCount) uris.add(cd.getItemAt(i).uri)
+            else data?.data?.let { uris.add(it) }
+            if (uris.isNotEmpty()) startDemImport(uris)
         }
     }
 
