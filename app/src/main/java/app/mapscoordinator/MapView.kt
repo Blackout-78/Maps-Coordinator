@@ -282,38 +282,22 @@ class MapView(ctx: Context) : View(ctx) {
             if (placed.size > 400) break
             val name = p.name ?: continue
             if (p.type > MapStore.T_TRAIL || rMpp > maxMppForName(p.type)) continue
-            var best = -1
-            var bl = 0f
-            for (i in 0 until p.lat.size - 1) {
-                val x1 = sx(p.lon[i]); val y1 = sy(p.lat[i])
-                val x2 = sx(p.lon[i + 1]); val y2 = sy(p.lat[i + 1])
-                if ((x1 < 0 && x2 < 0) || (x1 > fw && x2 > fw) || (y1 < 0 && y2 < 0) || (y1 > fh && y2 > fh)) continue
-                val len = hypot(x2 - x1, y2 - y1)
-                if (len > bl) { bl = len; best = i }
-            }
-            if (best < 0 || bl < 40f) continue
+            val n = p.lat.size
+            if (n < 2) continue
             val tw = labelPaint.measureText(name)
-            if (bl < tw + 12f) continue
-            var ax = sx(p.lon[best]); var ay = sy(p.lat[best])
-            var bx = sx(p.lon[best + 1]); var by = sy(p.lat[best + 1])
-            if (bx < ax) { val tx = ax; ax = bx; bx = tx; val ty = ay; ay = by; by = ty }
-            val mx = (ax + bx) / 2; val my = (ay + by) / 2
-            if (mx < 0 || mx > fw || my < 0 || my > fh) continue
+            val px = FloatArray(n) { sx(p.lon[it]) }
+            val py = FloatArray(n) { sy(p.lat[it]) }
+            val spot = Labels.place(px, py, n, fw, fh, tw, ts) ?: continue
             var dup = false
-            for (u in usedNames) if (u.first == name && hypot(u.second - mx, u.third - my) < 260f) { dup = true; break }
+            for (u in usedNames) if (u.first == name && hypot(u.second - spot.midX, u.third - spot.midY) < 260f) { dup = true; break }
             if (dup) continue
-            val cs = abs(bx - ax) / bl
-            val sn = abs(by - ay) / bl
-            val r = RectF(mx - (tw / 2 * cs + ts / 2 * sn), my - (tw / 2 * sn + ts / 2 * cs),
-                mx + (tw / 2 * cs + ts / 2 * sn), my + (tw / 2 * sn + ts / 2 * cs))
-            if (!free(r)) continue
-            usedNames.add(Triple(name, mx, my))
+            if (!free(RectF(spot.left, spot.top, spot.right, spot.bottom))) continue
+            usedNames.add(Triple(name, spot.midX, spot.midY))
             path.reset()
-            path.moveTo(ax, ay)
-            path.lineTo(bx, by)
-            val h = (bl - tw) / 2
-            c.drawTextOnPath(name, path, h, ts * 0.35f, haloPaint)
-            c.drawTextOnPath(name, path, h, ts * 0.35f, labelPaint)
+            path.moveTo(spot.xs[0], spot.ys[0])
+            for (k in 1 until spot.n) path.lineTo(spot.xs[k], spot.ys[k])
+            c.drawTextOnPath(name, path, spot.hOffset, ts * 0.35f, haloPaint)
+            c.drawTextOnPath(name, path, spot.hOffset, ts * 0.35f, labelPaint)
         }
     }
 
@@ -524,7 +508,7 @@ class MapView(ctx: Context) : View(ctx) {
             run {
                 drawStreetNames(c, roads)
                 if (rMpp < 3) drawSpeedSigns(c, roads)
-                if (rMpp < 1.5) drawHouseNumbers(c, detail)
+                if (rMpp < 2.5) drawHouseNumbers(c, detail)
                 if (rMpp < 5) drawBusinesses(c, detail)
             }
             drawPlaces(c, byType[MapStore.T_PLACE])
