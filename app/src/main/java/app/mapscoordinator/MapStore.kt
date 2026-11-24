@@ -15,6 +15,7 @@ object MapStore {
     const val CELL_E7 = 200000
 
     class Poly(val type: Int, val lanes: Int, val speed: Int, val lat: IntArray, val lon: IntArray, val name: String? = null) {
+        var bridge = false
         val minLat: Int
         val maxLat: Int
         val minLon: Int
@@ -76,7 +77,8 @@ object MapStore {
                     }
                     val type = rawType and 0x7F
                     val named = (rawType and 0x80) != 0
-                    val lanes = inp.readUnsignedByte()
+                    val lanesRaw = inp.readUnsignedByte()
+                    val lanes = lanesRaw and 0x7F
                     val speed = inp.readUnsignedShort()
                     val n = inp.readUnsignedShort()
                     val lat = IntArray(n)
@@ -92,7 +94,9 @@ object MapStore {
                         inp.readFully(b)
                         name = String(b, Charsets.UTF_8)
                     }
-                    out.add(Poly(type, lanes, speed, lat, lon, name))
+                    val poly = Poly(type, lanes, speed, lat, lon, name)
+                    poly.bridge = (lanesRaw and 0x80) != 0 && type <= T_SERVICE
+                    out.add(poly)
                 }
             }
         } catch (e: Exception) {

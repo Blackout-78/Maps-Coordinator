@@ -32,7 +32,7 @@ class MapView(ctx: Context) : View(ctx) {
     var showTerrain = true
     var showContours = true
     var tilt = false
-        set(t) { field = t; bmp = null; mapDirty = true; invalidate() }
+        set(t) { field = t; bmp = null; fbmp = null; mapDirty = true; invalidate() }
     var route: List<Route.Wp> = emptyList()
         set(r) { field = r; invalidate() }
     private val tiltPitch = 55f
@@ -77,6 +77,11 @@ class MapView(ctx: Context) : View(ctx) {
     @Volatile private var ovLoading = false
     @Volatile private var rMpp = 4.0
     private var bmp: Bitmap? = null
+    private var fbmp: Bitmap? = null
+    private var fLat = 0.0
+    private var fLon = 0.0
+    private var fMpp = 1.0
+    private val farFactor = 4.0
     private var bmpLat = 0.0
     private var bmpLon = 0.0
     private var bmpMpp = 1.0
@@ -449,6 +454,7 @@ class MapView(ctx: Context) : View(ctx) {
 
         if (hasMaps && !tooWide) {
             val byType = Array(15) { ArrayList<MapStore.Poly>() }
+            val bridges = ArrayList<MapStore.Poly>()
             for (cy in cy0..cy1) for (cx in cx0..cx1) {
                 val polys = getCell(cx, cy) ?: continue
                 for (p in polys) {
@@ -456,7 +462,7 @@ class MapView(ctx: Context) : View(ctx) {
                     if (p.type == MapStore.T_TRAIL && rMpp > 10) continue
                     if (p.type == MapStore.T_SERVICE && rMpp > 12) continue
                     if (p.type == MapStore.T_LOCAL && rMpp > 25) continue
-                    byType[p.type].add(p)
+                    if (tilt && p.bridge && p.type <= MapStore.T_SERVICE) bridges.add(p) else byType[p.type].add(p)
                 }
             }
             contourLabels.clear()
@@ -480,8 +486,8 @@ class MapView(ctx: Context) : View(ctx) {
                 for (p in blds) {
                     var dyPx = 0f
                     if (tilt) {
-                        val hm = if (p.speed > 0) p.speed.toFloat() else 6f
-                        dyPx = (hm / rMpp * 0.7).toFloat().coerceAtMost(260f)
+                        val hm = if (p.speed > 0) p.speed.toFloat() else 9f
+                        dyPx = (hm / rMpp * 1.9).toFloat().coerceAtMost(420f)
                     }
                     val n = p.lat.size
                     for (i in 0 until n) {
@@ -525,6 +531,7 @@ class MapView(ctx: Context) : View(ctx) {
                 drawLines(c, byType[t], casing, px + 3f, null, w, h, cLat, cLon, kx, ky)
                 drawLines(c, byType[t], roadFill[t], px, null, w, h, cLat, cLon, kx, ky)
             }
+            if (bridges.isNotEmpty()) drawBridges(c, bridges, w, h, cLat, cLon, kx, ky)
             // lane lines: yellow double centre line on even lane counts, white dashes between same-way lanes
             if (showLanes && rMpp < 3) {
                 for (t in 0..4) drawLaneLines(c, byType[t], (widthM[t] / rMpp).toFloat(), w, h, cLat, cLon, kx, ky)
@@ -577,20 +584,34 @@ class MapView(ctx: Context) : View(ctx) {
         val lat = centerLat
         val lon = centerLon
         val m = mpp
+        val wantFar = tilt
         renderExec.execute {
             var out: Bitmap? = null
+            var far: Bitmap? = null
             try {
                 out = Bitmap.createBitmap(bw, bh, Bitmap.Config.RGB_565)
                 renderMap(Canvas(out), bw.toFloat(), bh.toFloat(), lat, lon, m)
+                if (wantFar) {
+                    // coarse layer behind the sharp one so the 3D view reaches toward the horizon
+                    try {
+                        val fw2 = (bw * 0.7f).toInt(); val fh2 = (bh * 1.5f).toInt()
+                        far = Bitmap.createBitmap(fw2, fh2, Bitmap.Config.RGB_565)
+                        renderMap(Canvas(far), fw2.toFloat(), fh2.toFloat(), lat, lon, m * farFactor)
+                    } catch (t: Throwable) { far?.recycle(); far = null }
+                }
             } catch (t: Throwable) {
                 out = null
             }
             val result = out
+            val farResult = far
             val done = Runnable {
                 val old = bmp
+                val oldFar = fbmp
                 if (result != null) {
                     bmp = result; bmpLat = lat; bmpLon = lon; bmpMpp = m
+                    fbmp = farResult; fLat = lat; fLon = lon; fMpp = m * farFactor
                     old?.recycle()
+                    oldFar?.recycle()
                 }
                 rendering = false
                 invalidate()
@@ -624,6 +645,17 @@ class MapView(ctx: Context) : View(ctx) {
         if (hasMaps) {
             val b = bmp
             var needs = b == null || mapDirty
+            val fb = fbmp
+            if (tilt && fb != null) {
+                val fs = (fMpp / mpp).toFloat()
+                val fx = w / 2 + ((fLon - centerLon) * 111320.0 * cosLat / mpp).toFloat()
+                val fy = h / 2 + ((centerLat - fLat) * 110574.0 / mpp).toFloat()
+                c.save()
+                c.translate(fx, fy)
+                c.scale(fs, fs)
+                c.drawBitmap(fb, -fb.width / 2f, -fb.height / 2f, bmpPaint)
+                c.restore()
+            }
             if (b != null) {
                 val s = (bmpMpp / mpp).toFloat()
                 val cx = w / 2 + ((bmpLon - centerLon) * 111320.0 * cosLat / mpp).toFloat()
@@ -813,6 +845,44 @@ class MapView(ctx: Context) : View(ctx) {
         c.restore()
     }
 
+    /** Bridges stand on pillars above the ground in the 3D view. */
+    private fun drawBridges(c: Canvas, list: List<MapStore.Poly>, w: Float, h: Float, cLat: Double, cLon: Double, kx: Double, ky: Double) {
+        val deck = (7.0 / rMpp * 1.9).toFloat().coerceIn(6f, 200f)
+        // ground shadow
+        for (t in 0..5) {
+            val l = list.filter { it.type == t }
+            if (l.isEmpty()) continue
+            val px = maxOf(3f, (widthM[t] / rMpp).toFloat())
+            drawLines(c, l, Color.argb(110, 0, 0, 0), px + 6f, null, w, h, cLat, cLon, kx, ky)
+        }
+        // pillars
+        paint.pathEffect = null
+        paint.color = Color.parseColor("#1B2238")
+        paint.strokeWidth = maxOf(3f, (2.5 / rMpp).toFloat()).coerceAtMost(9f)
+        for (p in list) {
+            var acc = 0f
+            var px0 = 0f; var py0 = 0f
+            for (i in p.lat.indices) {
+                val x = (w / 2 + (p.lon[i] - cLon) * kx).toFloat()
+                val y = (h / 2 - (p.lat[i] - cLat) * ky).toFloat()
+                if (i > 0) acc += Math.hypot((x - px0).toDouble(), (y - py0).toDouble()).toFloat()
+                if (i == 0 || i == p.lat.size - 1 || acc > 60f) {
+                    if (x > -50 && x < w + 50 && y > -50 && y < h + deck + 50) c.drawLine(x, y, x, y - deck, paint)
+                    acc = 0f
+                }
+                px0 = x; py0 = y
+            }
+        }
+        // the raised deck
+        for (t in intArrayOf(5, 4, 3, 2, 1, 0)) {
+            val l = list.filter { it.type == t }
+            if (l.isEmpty()) continue
+            val px = maxOf(3f, (widthM[t] / rMpp).toFloat())
+            drawLines(c, l, casing, px + 3f, null, w, h, cLat, cLon, kx, ky, deck)
+            drawLines(c, l, roadFill[t], px, null, w, h, cLat, cLon, kx, ky, deck)
+        }
+    }
+
     private fun drawLaneLines(c: Canvas, list: List<MapStore.Poly>, roadPx: Float, w: Float, h: Float,
                               cLat: Double, cLon: Double, kx: Double, ky: Double) {
         if (list.isEmpty() || roadPx < 9f) return
@@ -869,7 +939,7 @@ class MapView(ctx: Context) : View(ctx) {
 
     private fun drawLines(c: Canvas, list: List<MapStore.Poly>, color: Int, width: Float, effect: DashPathEffect?,
                           w: Float = fw, h: Float = fh, cLat: Double = fcLat, cLon: Double = fcLon,
-                          kx: Double = fkx, ky: Double = fky) {
+                          kx: Double = fkx, ky: Double = fky, dy: Float = 0f) {
         if (list.isEmpty()) return
         paint.color = color
         paint.strokeWidth = width
@@ -879,7 +949,7 @@ class MapView(ctx: Context) : View(ctx) {
         for (p in list) {
             for (i in p.lat.indices) {
                 val x = (w / 2 + (p.lon[i] - cLon) * kx).toFloat()
-                val y = (h / 2 - (p.lat[i] - cLat) * ky).toFloat()
+                val y = (h / 2 - (p.lat[i] - cLat) * ky).toFloat() - dy
                 if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
             }
             if (++inPath >= 300) {

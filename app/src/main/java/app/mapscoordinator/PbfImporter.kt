@@ -577,6 +577,7 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
         var wCity: String? = null
         var wPoi = false
         var bHeight = 0
+        var isBridge = false
         var bLevels = 0
         var turnF: String? = null
         var turnB: String? = null
@@ -595,6 +596,7 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
                 "addr:city" -> wCity = v
                 "amenity", "shop", "tourism" -> wPoi = true
                 "addr:housenumber" -> house = v
+                "bridge" -> isBridge = v != "no"
                 "height" -> bHeight = Math.round(v.trim().takeWhile { it.isDigit() || it == '.' }.toDoubleOrNull() ?: 0.0).toInt()
                 "building:levels" -> bLevels = v.trim().toDoubleOrNull()?.toInt() ?: 0
                 "turn:lanes", "turn:lanes:forward" -> turnF = v
@@ -660,7 +662,7 @@ class PbfImporter(private val ctx: Context, private val progress: (String) -> Un
         wayCount++
         val label = if (type <= MapStore.T_TRAIL) (wayName ?: wayRef?.substringBefore(';')) else if (type == MapStore.T_BUILD) house else null
         if (type == MapStore.T_BUILD) speed = if (bHeight > 0) minOf(bHeight, 500) else if (bLevels > 0) minOf(bLevels * 3, 500) else 0
-        emit(type, lanes, speed, lat, lon, n, label)
+        emit(type, if (isBridge && type <= MapStore.T_SERVICE) (minOf(lanes, 127) or 0x80) else lanes, speed, lat, lon, n, label)
         if (type <= MapStore.T_SERVICE) {
             val tf = turnF
             val tb = turnB
